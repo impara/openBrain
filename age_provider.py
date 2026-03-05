@@ -15,15 +15,33 @@ Security notes:
 
 import json
 import logging
+import os
 import re
 from contextlib import contextmanager
 
+from openai import OpenAI
 from psycopg2 import pool
 from psycopg2.extras import Json
+from pydantic import BaseModel, Field
 
 class GraphWriteError(Exception):
     """Raised when a graph operation fails and cannot be recovered."""
     pass
+
+class _Entity(BaseModel):
+    name: str = Field(description="The name of the entity, e.g. 'Project Solar' or 'test_user'")
+    label: str = Field(description="A generic node label like 'Project', 'Person', 'Concept'")
+
+class _Edge(BaseModel):
+    source: str = Field(description="Name of the source entity")
+    source_label: str = Field(description="Label of the source entity")
+    relationship: str = Field(description="The relationship, e.g. 'WORKING_ON', 'PREFERS'")
+    target: str = Field(description="Name of the target entity")
+    target_label: str = Field(description="Label of the target entity")
+
+class _GraphExtraction(BaseModel):
+    nodes: list[_Entity]
+    edges: list[_Edge]
 
 # We don't inherit from BaseGraphProvider because it doesn't exist in mem0ai 1.0.5
 # We implement the interface expected by Memory.py directly instead.
@@ -44,23 +62,6 @@ class ApacheAGEProvider:
     def add(self, data: str, filters: dict):
         """Minimal add implementation for Mem0 compatibility."""
         logger.debug("Graph add called with data=%r filters=%r", data[:50], filters)
-        
-        from pydantic import BaseModel, Field
-        
-        class Entity(BaseModel):
-            name: str = Field(description="The name of the entity, e.g. 'Project Solar' or 'test_user'")
-            label: str = Field(description="A generic node label like 'Project', 'Person', 'Concept'")
-            
-        class Edge(BaseModel):
-            source: str = Field(description="Name of the source entity")
-            source_label: str = Field(description="Label of the source entity")
-            relationship: str = Field(description="The relationship, e.g. 'WORKING_ON', 'PREFERS'")
-            target: str = Field(description="Name of the target entity")
-            target_label: str = Field(description="Label of the target entity")
-            
-        class GraphExtraction(BaseModel):
-            nodes: list[Entity]
-            edges: list[Edge]
 
         user_id = filters.get("user_id", "default")
         
@@ -81,7 +82,7 @@ class ApacheAGEProvider:
                         "content": data
                     }
                 ],
-                response_format=GraphExtraction,
+                response_format=_GraphExtraction,
             )
             ext = response.choices[0].message.parsed
             
@@ -130,8 +131,6 @@ class ApacheAGEProvider:
             raise ValueError(f"Invalid graph_name: {graph_name!r}")
         self.graph_name = graph_name
 
-        import os
-        from openai import OpenAI
         self._openai = OpenAI(
             api_key=openai_api_key or os.environ.get("OPENAI_API_KEY")
         )
