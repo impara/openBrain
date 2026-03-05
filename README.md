@@ -9,30 +9,32 @@ Give your AI agent a persistent memory that remembers *what* happened (vector se
 ## Architecture
 
 ```
-┌─────────────────────────┐
-│     Claude / Agent      │
-│  (via MCP protocol)     │
-└──────────┬──────────────┘
-           │ streamable-http (/mcp)
-           │ (or stdio for local)
-┌──────────▼──────────────┐
-│   OpenBrain MCP Server  │
-│   (open_brain_mcp.py)   │
-│                         │
-│  ┌───────┐  ┌─────────┐ │
-│  │ Mem0  │  │  AGE    │ │
-│  │(embed)│  │(graph)  │ │
-│  └───┬───┘  └────┬────┘ │
-└──────┼───────────┼──────┘
-       │           │
-┌──────▼───────────▼──────┐
-│   PostgreSQL 16         │
-│                         │
-│  pgvector  → Embeddings │
-│  Apache AGE → Knowledge │
-│  pg_partman → Partitions│
-│  pg_cron    → Automation│
-└─────────────────────────┘
+┌─────────────────────────┐     ┌─────────────────────────┐
+│     Claude / Agent      │     │     Telegram User       │
+│  (via MCP protocol)     │     │  (via Telegram Bot API) │
+└──────────┬──────────────┘     └──────────┬──────────────┘
+           │ streamable-http (/mcp)         │ long-polling
+           │ (or stdio for local)           │
+┌──────────▼──────────────┐     ┌──────────▼──────────────┐
+│   OpenBrain MCP Server  │     │   Telegram Bot          │
+│   (open_brain_mcp.py)   │     │   (telegram_bot.py)     │
+└──────────┬──────────────┘     └──────────┬──────────────┘
+           │                               │
+           └───────────┬───────────────────┘
+                       │ brain_core.py
+              ┌────────▼────────┐
+              │  Mem0  │  AGE   │
+              │(embed) │(graph) │
+              └────┬───┴───┬───┘
+                   │       │
+              ┌────▼───────▼────┐
+              │  PostgreSQL 16  │
+              │                 │
+              │ pgvector → Emb. │
+              │ AGE → Knowledge │
+              │ partman → Parts │
+              │ pg_cron → Auto  │
+              └─────────────────┘
 ```
 
 | Component | Role |
@@ -66,9 +68,10 @@ cp .env.example .env
 docker compose up -d
 ```
 
-This starts two containers:
+This starts three containers:
 - `open_brain_postgres` — Custom Postgres 16 with AGE + pgvector + pg_partman + pg_cron
 - `open_brain_mcp` — Python MCP server exposing the memory tools
+- `open_brain_telegram` — Telegram bot for chat-based memory access
 
 ### 3. Verify
 
@@ -124,6 +127,8 @@ All configuration is via environment variables (`.env` file):
 | `OPENAI_API_KEY` | **Yes** | — | OpenAI API key for Mem0 |
 | `MEMORY_RETENTION_MONTHS` | No | `12` | Partition retention window |
 | `LOG_LEVEL` | No | `INFO` | Python log level |
+| `TELEGRAM_BOT_TOKEN` | No | — | Telegram bot token from @BotFather |
+| `TELEGRAM_AUTO_CAPTURE` | No | `false` | Auto-save plain text messages as thoughts |
 
 ---
 
@@ -162,6 +167,34 @@ For direct local integration (e.g., Claude Desktop), pipe into the Docker contai
 
 ---
 
+## Telegram Bot
+
+Chat with your brain from Telegram using `/remember` and `/search` commands.
+
+### Setup
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram → `/newbot` → copy the token
+2. Add to your `.env`:
+   ```env
+   TELEGRAM_BOT_TOKEN=your-token-here
+   ```
+3. `docker compose up -d` — the bot container starts automatically
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `/start` | Welcome message + usage |
+| `/remember <text>` | Save a thought to your brain |
+| `/search <query>` | Search your memories |
+| `/help` | Show available commands |
+
+Memories are isolated by Telegram user ID (`telegram_<id>`).
+
+Set `TELEGRAM_AUTO_CAPTURE=true` in `.env` to auto-save all plain text messages.
+
+---
+
 ## Development
 
 ### Local Setup (without Docker)
@@ -191,12 +224,15 @@ python -m pytest tests/ -v
 
 ```
 openBrain/
+├── brain_core.py          # Shared memory layer (Mem0 + AGE init, capture/search)
 ├── age_provider.py       # Apache AGE graph provider (Mem0 BaseGraphProvider)
-├── open_brain_mcp.py     # MCP server with capture_thought / search_brain tools
+├── open_brain_mcp.py     # MCP server wrapping brain_core tools
+├── telegram_bot.py       # Telegram bot client (/remember, /search)
 ├── init.sql              # Database schema, partitioning, indexes, cron
 ├── Dockerfile            # Custom Postgres 16 + AGE + pgvector + partman + cron
 ├── Dockerfile.mcp        # Python container for the MCP server
-├── docker-compose.yml    # Two-service orchestration (DB + MCP)
+├── Dockerfile.telegram   # Python container for the Telegram bot
+├── docker-compose.yml    # Three-service orchestration (DB + MCP + Telegram)
 ├── mcp.json              # MCP server config reference for IDE integration
 ├── requirements.txt      # Pinned Python dependencies
 ├── .env.example          # Environment variable template

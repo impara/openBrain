@@ -43,6 +43,21 @@ services:
     networks:
       - brain_net
 
+  open-brain-telegram:
+    build:
+      context: .
+      dockerfile: Dockerfile.telegram
+    container_name: open_brain_telegram
+    env_file: .env
+    environment:
+      POSTGRES_HOST: open-brain-db
+    depends_on:
+      open-brain-db:
+        condition: service_healthy
+    restart: always
+    networks:
+      - brain_net
+
 networks:
   brain_net:
     driver: bridge

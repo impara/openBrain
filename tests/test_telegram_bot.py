@@ -1,0 +1,177 @@
+"""
+test_telegram_bot.py — Unit tests for the Telegram bot handlers.
+
+All external dependencies (brain_core, telegram) are mocked so tests
+run without the full stack or a real bot token.
+"""
+
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
+import pytest
+
+
+# ── Mock brain_core before importing telegram_bot ──
+brain_core_mock = MagicMock()
+brain_core_mock.capture_thought = MagicMock(
+    return_value="Successfully captured thought into memory."
+)
+brain_core_mock.search_brain = MagicMock(
+    return_value="=== Retrieved Brain Context ===\n- Test memory\n"
+)
+sys.modules.setdefault("brain_core", brain_core_mock)
+
+# Must set token before import
+with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token", "POSTGRES_PASSWORD": "test"}):
+    from telegram_bot import (
+        start_handler,
+        help_handler,
+        remember_handler,
+        search_handler,
+        text_handler,
+        _user_id,
+    )
+
+
+# ── Fixtures ──────────────────────────────────
+
+@pytest.fixture
+def mock_update():
+    """Create a mock Telegram Update object."""
+    update = MagicMock()
+    update.effective_user.id = 12345
+    update.message.reply_text = AsyncMock()
+    update.message.text = "Hello world"
+    return update
+
+
+@pytest.fixture
+def mock_context():
+    """Create a mock Telegram context."""
+    ctx = MagicMock()
+    ctx.args = []
+    return ctx
+
+
+# ── Tests ─────────────────────────────────────
+
+class TestUserIdMapping:
+    """Test Telegram user_id → OpenBrain user_id mapping."""
+
+    def test_maps_telegram_id(self, mock_update):
+        assert _user_id(mock_update) == "telegram_12345"
+
+    def test_different_users_get_different_ids(self, mock_update):
+        mock_update.effective_user.id = 99999
+        assert _user_id(mock_update) == "telegram_99999"
+
+
+class TestStartHandler:
+    """Test /start command."""
+
+    @pytest.mark.asyncio
+    async def test_sends_welcome(self, mock_update, mock_context):
+        await start_handler(mock_update, mock_context)
+        mock_update.message.reply_text.assert_called_once()
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "OpenBrain" in text
+        assert "/remember" in text
+        assert "/search" in text
+
+
+class TestHelpHandler:
+    """Test /help command."""
+
+    @pytest.mark.asyncio
+    async def test_sends_help(self, mock_update, mock_context):
+        await help_handler(mock_update, mock_context)
+        mock_update.message.reply_text.assert_called_once()
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "/remember" in text
+        assert "/search" in text
+
+
+class TestRememberHandler:
+    """Test /remember command."""
+
+    @pytest.mark.asyncio
+    async def test_captures_thought(self, mock_update, mock_context):
+        mock_context.args = ["I", "prefer", "dark", "mode"]
+        with patch("telegram_bot.capture_thought", return_value="Successfully captured thought into memory."):
+            await remember_handler(mock_update, mock_context)
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "✅" in text
+
+    @pytest.mark.asyncio
+    async def test_empty_thought_warns(self, mock_update, mock_context):
+        mock_context.args = []
+        await remember_handler(mock_update, mock_context)
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "⚠️" in text
+
+    @pytest.mark.asyncio
+    async def test_uses_telegram_user_id(self, mock_update, mock_context):
+        mock_context.args = ["test", "thought"]
+        with patch("telegram_bot.capture_thought", return_value="ok") as mock_capture:
+            await remember_handler(mock_update, mock_context)
+            mock_capture.assert_called_once_with("test thought", user_id="telegram_12345")
+
+    @pytest.mark.asyncio
+    async def test_handles_error(self, mock_update, mock_context):
+        mock_context.args = ["test"]
+        with patch("telegram_bot.capture_thought", side_effect=RuntimeError("DB down")):
+            await remember_handler(mock_update, mock_context)
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "❌" in text
+
+
+class TestSearchHandler:
+    """Test /search command."""
+
+    @pytest.mark.asyncio
+    async def test_searches_brain(self, mock_update, mock_context):
+        mock_context.args = ["dark", "mode"]
+        with patch("telegram_bot.search_brain", return_value="=== Retrieved Brain Context ===\n- dark mode\n"):
+            await search_handler(mock_update, mock_context)
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "Brain Context" in text
+
+    @pytest.mark.asyncio
+    async def test_empty_query_warns(self, mock_update, mock_context):
+        mock_context.args = []
+        await search_handler(mock_update, mock_context)
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "⚠️" in text
+
+    @pytest.mark.asyncio
+    async def test_uses_telegram_user_id(self, mock_update, mock_context):
+        mock_context.args = ["query"]
+        with patch("telegram_bot.search_brain", return_value="results") as mock_search:
+            await search_handler(mock_update, mock_context)
+            mock_search.assert_called_once_with("query", user_id="telegram_12345")
+
+    @pytest.mark.asyncio
+    async def test_handles_error(self, mock_update, mock_context):
+        mock_context.args = ["test"]
+        with patch("telegram_bot.search_brain", side_effect=RuntimeError("DB down")):
+            await search_handler(mock_update, mock_context)
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "❌" in text
+
+
+class TestAutoCapture:
+    """Test plain text auto-capture behavior."""
+
+    @pytest.mark.asyncio
+    async def test_no_capture_when_disabled(self, mock_update, mock_context):
+        with patch("telegram_bot.AUTO_CAPTURE", False):
+            await text_handler(mock_update, mock_context)
+        mock_update.message.reply_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_captures_when_enabled(self, mock_update, mock_context):
+        with patch("telegram_bot.AUTO_CAPTURE", True), \
+             patch("telegram_bot.capture_thought", return_value="ok"):
+            await text_handler(mock_update, mock_context)
+        mock_update.message.reply_text.assert_called_once()
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "💭" in text

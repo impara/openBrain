@@ -82,8 +82,24 @@ You can still run a python script to test the logic directly:
 1. Ensure the containers are running.
 2. Run:
 ```bash
-docker compose exec open-brain-mcp python -c "from open_brain_mcp import capture_thought; print(capture_thought('Testing background brain.', user_id='test1'))"
+docker compose exec open-brain-mcp python -c "from brain_core import capture_thought; print(capture_thought('Testing background brain.', user_id='test1'))"
 ```
+
+### Telegram Bot Verification
+If `TELEGRAM_BOT_TOKEN` is set in `.env`:
+```bash
+# Check the Telegram bot container is running
+docker compose ps open-brain-telegram
+
+# Check logs for successful startup
+docker compose logs --tail=10 open-brain-telegram
+```
+*Expected: `Starting OpenBrain Telegram bot` with no errors.*
+
+Then in Telegram:
+1. Send `/start` to your bot — should get a welcome message
+2. Send `/remember I prefer dark mode` — should confirm capture
+3. Send `/search dark mode` — should return the memory
 
 ### Cleanup After Testing
 To reset the environment completely:
@@ -93,4 +109,4 @@ docker compose down -v
 *(The `-v` flag removes the Postgres data volume, allowing you to start fresh with `init.sql`).*
 
 > [!IMPORTANT]
-> **LLM Quota Requirement**: The `capture_thought` tool uses the LLM to extract facts from text. If your OpenAI Key only has embedding access (or is out of quota), the `m.add()` call will fail. Ensure your key has access to `gpt-4o-mini` (default) or update the config in `open_brain_mcp.py`.
+> **LLM Quota Requirement**: The `capture_thought` tool uses the LLM to extract facts from text. If your OpenAI Key only has embedding access (or is out of quota), the `m.add()` call will fail. Ensure your key has access to `gpt-4o-mini` (default) or update the config in `brain_core.py`.
