@@ -124,6 +124,7 @@ All configuration is via environment variables (`.env` file):
 | `POSTGRES_PASSWORD` | **Yes** | — | Database password |
 | `POSTGRES_HOST` | No | `localhost` | DB host (set to `open-brain-db` in Docker) |
 | `POSTGRES_PORT` | No | `5432` | DB port |
+| `MCP_PORT` | No | `8000` | Host port mapped to MCP server container port 8000 |
 | `OPENAI_API_KEY` | **Yes** | — | OpenAI API key for Mem0 |
 | `MEMORY_RETENTION_MONTHS` | No | `12` | Partition retention window |
 | `LOG_LEVEL` | No | `INFO` | Python log level |
