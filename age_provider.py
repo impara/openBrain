@@ -35,25 +35,86 @@ _LABEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _GRAPH_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _PROP_VALUE_MAX_LEN = 2000
 _SEARCH_TERM_MAX_LEN = 200
-_SEARCH_TERM_RE = re.compile(r"^[A-Za-z0-9\s\-_.@']+$")
+_SEARCH_TERM_RE = re.compile(r"^[A-Za-z0-9\s\-_.@]+$")
 
 
 class ApacheAGEProvider:
+    """Mem0-compatible graph provider backed by Apache AGE (Cypher-on-Postgres)."""
 
     def add(self, data: str, filters: dict):
         """Minimal add implementation for Mem0 compatibility."""
         logger.debug("Graph add called with data=%r filters=%r", data[:50], filters)
-        # For now, we skip internal extraction since we want the vector store to be the primary for this test
-        # In a full implementation, we would extract entities here.
-        return {"added_entities": [], "deleted_entities": []}
+        
+        from pydantic import BaseModel, Field
+        
+        class Entity(BaseModel):
+            name: str = Field(description="The name of the entity, e.g. 'Project Solar' or 'test_user'")
+            label: str = Field(description="A generic node label like 'Project', 'Person', 'Concept'")
+            
+        class Edge(BaseModel):
+            source: str = Field(description="Name of the source entity")
+            source_label: str = Field(description="Label of the source entity")
+            relationship: str = Field(description="The relationship, e.g. 'WORKING_ON', 'PREFERS'")
+            target: str = Field(description="Name of the target entity")
+            target_label: str = Field(description="Label of the target entity")
+            
+        class GraphExtraction(BaseModel):
+            nodes: list[Entity]
+            edges: list[Edge]
+
+        user_id = filters.get("user_id", "default")
+        
+        try:
+            response = self._openai.beta.chat.completions.parse(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Extract entities and relationships from the text to build a knowledge graph. "
+                            f"Resolve self-references like 'I' or 'my' to the User ID '{user_id}'. "
+                            "Make entities discrete and relationships concise."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": data
+                    }
+                ],
+                response_format=GraphExtraction,
+            )
+            ext = response.choices[0].message.parsed
+            
+            nodes = [
+                {"label": n.label, "properties": {"name": n.name, "user_id": user_id}}
+                for n in ext.nodes
+            ]
+            edges = [
+                {
+                    "source": e.source, "source_label": e.source_label,
+                    "target": e.target, "target_label": e.target_label,
+                    "relationship": e.relationship
+                }
+                for e in ext.edges
+            ]
+            
+            if nodes:
+                self.add_nodes(nodes)
+            if edges:
+                self.add_edges(edges)
+                
+            return {"added_entities": nodes, "deleted_entities": []}
+            
+        except Exception as e:
+            logger.error("Graph extraction failed, skipping graph write: %s", e)
+            self._log_to_dlq("extraction", {"data": data[:200], "filters": filters}, e)
+            return {"added_entities": [], "deleted_entities": []}
 
     def get_all(self, filters, limit=100):
         return []
 
     def delete_all(self, filters):
         pass
-
-    """Mem0-compatible graph provider backed by Apache AGE (Cypher-on-Postgres)."""
 
     def __init__(
         self,
@@ -63,10 +124,17 @@ class ApacheAGEProvider:
         host: str = "localhost",
         port: int = 5432,
         graph_name: str = "brain_graph",
+        openai_api_key: str = None,
     ):
         if not _GRAPH_NAME_RE.match(graph_name):
             raise ValueError(f"Invalid graph_name: {graph_name!r}")
         self.graph_name = graph_name
+
+        import os
+        from openai import OpenAI
+        self._openai = OpenAI(
+            api_key=openai_api_key or os.environ.get("OPENAI_API_KEY")
+        )
 
         self.pool = pool.ThreadedConnectionPool(
             minconn=2,
