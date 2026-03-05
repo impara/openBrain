@@ -256,6 +256,8 @@ class ApacheAGEProvider:
             """
             )
 
+            cur.execute("CREATE SCHEMA IF NOT EXISTS memory_store;")
+
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memory_store.graph_dlq (
