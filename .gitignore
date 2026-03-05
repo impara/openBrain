@@ -1,0 +1,25 @@
+# Environment
+.env
+
+# Python
+*.pyc
+__pycache__/
+.pytest_cache/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Skills library (copied for agent use, not project source)
+.agent/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

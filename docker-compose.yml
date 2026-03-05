@@ -1,0 +1,52 @@
+services:
+  open-brain-db:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: open_brain_postgres
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - brain_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: postgres -c shared_preload_libraries='age,pg_cron' -c cron.database_name='${POSTGRES_DB}'
+    restart: unless-stopped
+    networks:
+      - brain_net
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  open-brain-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    container_name: open_brain_mcp
+    env_file: .env
+    environment:
+      POSTGRES_HOST: open-brain-db
+    depends_on:
+      open-brain-db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    restart: always
+    volumes:
+      - .:/app
+    networks:
+      - brain_net
+
+networks:
+  brain_net:
+    driver: bridge
+
+volumes:
+  brain_data:
+    name: open_brain_data
