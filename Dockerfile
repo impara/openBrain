@@ -7,9 +7,9 @@ USER root
 # Install build tools, partman, and cron
 RUN apt-get update && apt-get install -y \
     build-essential \
-    postgresql-server-dev-16 \
-    postgresql-16-partman \
-    postgresql-16-cron \
+    postgresql-server-dev-16=16.13-1.pgdg13+1 \
+    postgresql-16-partman=5.4.2-1.pgdg13+1 \
+    postgresql-16-cron=1.6.7-2.pgdg13+1 \
     git \
     && rm -rf /var/lib/apt/lists/*
 

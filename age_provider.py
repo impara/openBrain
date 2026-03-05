@@ -21,6 +21,10 @@ from contextlib import contextmanager
 from psycopg2 import pool
 from psycopg2.extras import Json
 
+class GraphWriteError(Exception):
+    """Raised when a graph operation fails and cannot be recovered."""
+    pass
+
 # We don't inherit from BaseGraphProvider because it doesn't exist in mem0ai 1.0.5
 # We implement the interface expected by Memory.py directly instead.
 
@@ -224,6 +228,7 @@ class ApacheAGEProvider:
                 logger.warning("Skipping invalid node: %s", e)
             except Exception as e:
                 self._log_to_dlq("node", node, e)
+                raise GraphWriteError(f"Failed to write node to graph: {e}") from e
 
     def add_edges(self, edges: list[dict]):
         """Merge edges into the graph.  Each dict needs source, target, relationship."""
@@ -253,6 +258,7 @@ class ApacheAGEProvider:
                 logger.warning("Skipping invalid edge: %s", e)
             except Exception as e:
                 self._log_to_dlq("edge", edge, e)
+                raise GraphWriteError(f"Failed to write edge to graph: {e}") from e
 
     def search(self, query: str, filters: dict = None, limit: int = 5):
         """Search the knowledge graph for nodes related to the query terms.

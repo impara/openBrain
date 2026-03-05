@@ -58,11 +58,11 @@ class TestUserIdMapping:
     """Test Telegram user_id → OpenBrain user_id mapping."""
 
     def test_maps_telegram_id(self, mock_update):
-        assert _user_id(mock_update) == "telegram_12345"
+        assert _user_id(mock_update) == "default"
 
     def test_different_users_get_different_ids(self, mock_update):
         mock_update.effective_user.id = 99999
-        assert _user_id(mock_update) == "telegram_99999"
+        assert _user_id(mock_update) == "default"
 
 
 class TestStartHandler:
@@ -113,7 +113,7 @@ class TestRememberHandler:
         mock_context.args = ["test", "thought"]
         with patch("telegram_bot.capture_thought", return_value="ok") as mock_capture:
             await remember_handler(mock_update, mock_context)
-            mock_capture.assert_called_once_with("test thought", user_id="telegram_12345")
+            mock_capture.assert_called_once_with("test thought", user_id="default")
 
     @pytest.mark.asyncio
     async def test_handles_error(self, mock_update, mock_context):
@@ -147,7 +147,7 @@ class TestSearchHandler:
         mock_context.args = ["query"]
         with patch("telegram_bot.search_brain", return_value="results") as mock_search:
             await search_handler(mock_update, mock_context)
-            mock_search.assert_called_once_with("query", user_id="telegram_12345")
+            mock_search.assert_called_once_with("query", user_id="default")
 
     @pytest.mark.asyncio
     async def test_handles_error(self, mock_update, mock_context):

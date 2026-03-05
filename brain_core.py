@@ -28,6 +28,9 @@ if not os.environ.get("OPENAI_API_KEY"):
     raise ValueError("OPENAI_API_KEY environment variable is required.")
 
 # ── Mem0 + AGE Dual-Stack ─────────────────────
+# Note: Mem0 1.0.5 does not natively support injecting a live 'instance' of a custom provider
+# via config_dict cleanly. We monkey-patch m.graph here. If Mem0 updates to support
+# {"graph_store": {"provider": "custom", "instance": age_graph}}, this should be migrated.
 age_graph = ApacheAGEProvider(**DB_CONFIG)
 
 config_dict = {
@@ -57,9 +60,13 @@ def capture_thought(thought: str, user_id: str = "default") -> str:
     Call this when the user makes a decision, meets someone, or specifies a constraint.
     """
     logger.info("Capturing thought for user=%s (len=%d)", user_id, len(thought))
-    result = m.add(messages=[{"role": "user", "content": thought}], user_id=user_id)
-    logger.debug("Mem0 add result: %s", result)
-    return "Successfully captured thought into memory."
+    try:
+        result = m.add(messages=[{"role": "user", "content": thought}], user_id=user_id)
+        logger.debug("Mem0 add result: %s", result)
+        return "Successfully captured thought into memory."
+    except Exception as e:
+        logger.error("Memory capture failed (potential ghost memory): %s", e)
+        return f"Warning: Failed to fully commit memory. Error: {e}"
 
 
 def search_brain(query: str, user_id: str = "default") -> str:
