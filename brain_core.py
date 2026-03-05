@@ -68,23 +68,30 @@ def search_brain(query: str, user_id: str = "default") -> str:
     Call this BEFORE answering questions about the user's projects or history.
     """
     logger.info("Searching brain for user=%s query=%r", user_id, query[:80])
-    memories = m.search(query=query, user_id=user_id)
+    memories = m.search(query=query, user_id=user_id, limit=10)
 
     # Mem0 1.0.5 with graph enabled returns a dict {"results": [...], "relations": [...]}
     results = memories
     if isinstance(memories, dict):
         results = memories.get("results", [])
 
-    if not results:
+    # Filter by relevance — pgvector cosine distance: lower = more similar
+    SCORE_THRESHOLD = 0.75
+    relevant = [
+        r for r in results
+        if not isinstance(r, dict) or r.get("score", 0) <= SCORE_THRESHOLD
+    ]
+
+    if not relevant:
         return "No relevant memories found in the Open Brain."
 
-    context = "=== Retrieved Brain Context ===\n"
-    for memory in results:
+    context = ""
+    for memory in relevant:
         if isinstance(memory, dict):
-            text = memory.get("text", memory.get("content", str(memory)))
+            text = memory.get("memory", memory.get("text", memory.get("content", str(memory))))
         else:
             text = str(memory)
-        context += f"- {text}\n"
+        context += f"• {text}\n\n"
 
-    logger.debug("Returning %d context items", len(results))
-    return context
+    logger.debug("Returning %d relevant items (filtered from %d)", len(relevant), len(results))
+    return context.strip()

@@ -32,8 +32,12 @@ AUTO_CAPTURE = os.environ.get("TELEGRAM_AUTO_CAPTURE", "false").lower() == "true
 
 
 def _user_id(update: Update) -> str:
-    """Map Telegram user to OpenBrain user_id."""
-    return f"telegram_{update.effective_user.id}"
+    """Map Telegram user to OpenBrain user_id.
+    
+    Currently single-user mode — shares the same brain as the IDE.
+    For multi-user isolation, change to: return f"telegram_{update.effective_user.id}"
+    """
+    return "default"
 
 
 # ── Command Handlers ──────────────────────────
