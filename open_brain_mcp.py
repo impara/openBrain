@@ -32,7 +32,16 @@ def mcp_search_brain(query: str, user_id: str = "default") -> str:
     Searches the user's past memories via vector similarity and knowledge graph.
     Call this BEFORE answering questions about the user's projects or history.
     """
-    return search_brain(query, user_id)
+    return search_brain(query, user_id, debug=False)
+
+
+@mcp.tool(name="search_brain_debug")
+def mcp_search_brain_debug(query: str, user_id: str = "default") -> str:
+    """
+    Searches the user's past memories and returns scoring/debug trace details.
+    Use for retrieval quality troubleshooting.
+    """
+    return search_brain(query, user_id, debug=True)
 
 
 if __name__ == "__main__":

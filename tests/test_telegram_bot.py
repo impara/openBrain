@@ -27,6 +27,7 @@ with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token", "POSTGRES_PAS
         help_handler,
         remember_handler,
         search_handler,
+        search_debug_handler,
         text_handler,
         _user_id,
     )
@@ -76,6 +77,7 @@ class TestStartHandler:
         assert "OpenBrain" in text
         assert "/remember" in text
         assert "/search" in text
+        assert "/search_debug" in text
 
 
 class TestHelpHandler:
@@ -88,6 +90,7 @@ class TestHelpHandler:
         text = mock_update.message.reply_text.call_args[0][0]
         assert "/remember" in text
         assert "/search" in text
+        assert "/search_debug" in text
 
 
 class TestRememberHandler:
@@ -147,7 +150,7 @@ class TestSearchHandler:
         mock_context.args = ["query"]
         with patch("telegram_bot.search_brain", return_value="results") as mock_search:
             await search_handler(mock_update, mock_context)
-            mock_search.assert_called_once_with("query", user_id="default")
+            mock_search.assert_called_once_with("query", user_id="default", debug=False)
 
     @pytest.mark.asyncio
     async def test_handles_error(self, mock_update, mock_context):
@@ -175,3 +178,29 @@ class TestAutoCapture:
         mock_update.message.reply_text.assert_called_once()
         text = mock_update.message.reply_text.call_args[0][0]
         assert "💭" in text
+
+
+class TestSearchDebugHandler:
+    """Test /search_debug command."""
+
+    @pytest.mark.asyncio
+    async def test_searches_brain_in_debug_mode(self, mock_update, mock_context):
+        mock_context.args = ["dark", "mode"]
+        with patch("telegram_bot.search_brain", return_value="=== Search Debug ==="):
+            await search_debug_handler(mock_update, mock_context)
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "Search Debug" in text
+
+    @pytest.mark.asyncio
+    async def test_empty_query_warns(self, mock_update, mock_context):
+        mock_context.args = []
+        await search_debug_handler(mock_update, mock_context)
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "⚠️" in text
+
+    @pytest.mark.asyncio
+    async def test_uses_telegram_user_id(self, mock_update, mock_context):
+        mock_context.args = ["query"]
+        with patch("telegram_bot.search_brain", return_value="debug") as mock_search:
+            await search_debug_handler(mock_update, mock_context)
+            mock_search.assert_called_once_with("query", user_id="default", debug=True)

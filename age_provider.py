@@ -66,25 +66,52 @@ class ApacheAGEProvider:
         user_id = filters.get("user_id", "default")
         
         try:
-            response = self._openai.beta.chat.completions.parse(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Extract entities and relationships from the text to build a knowledge graph. "
-                            f"Resolve self-references like 'I' or 'my' to the User ID '{user_id}'. "
-                            "Make entities discrete and relationships concise."
-                        )
-                    },
-                    {
-                        "role": "user",
-                        "content": data
-                    }
-                ],
-                response_format=_GraphExtraction,
+            extraction_instruction = (
+                "Extract entities and relationships from the text to build a knowledge graph. "
+                f"Resolve self-references like 'I' or 'my' to the User ID '{user_id}'. "
+                "Make entities discrete and relationships concise."
             )
-            ext = response.choices[0].message.parsed
+            json_shape_instruction = (
+                "Return ONLY valid JSON with this shape: "
+                "{\"nodes\": [{\"name\": \"...\", \"label\": \"...\"}], "
+                "\"edges\": [{\"source\": \"...\", \"source_label\": \"...\", "
+                "\"relationship\": \"...\", \"target\": \"...\", \"target_label\": \"...\"}]}"
+            )
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": extraction_instruction
+                },
+                {
+                    "role": "user",
+                    "content": data
+                }
+            ]
+
+            if hasattr(self._openai.chat.completions, "parse"):
+                response = self._openai.chat.completions.parse(
+                    model="gpt-4o-mini",
+                    messages=messages,
+                    response_format=_GraphExtraction,
+                )
+                ext = response.choices[0].message.parsed
+            else:
+                # Fallback for SDKs that don't expose parse(): force JSON mode and validate.
+                response = self._openai.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": f"{extraction_instruction} {json_shape_instruction}"},
+                        {"role": "user", "content": data},
+                    ],
+                    response_format={"type": "json_object"},
+                )
+                raw = (response.choices[0].message.content or "").strip()
+                payload = json.loads(raw) if raw else {}
+                if hasattr(_GraphExtraction, "model_validate"):
+                    ext = _GraphExtraction.model_validate(payload)
+                else:
+                    ext = _GraphExtraction.parse_obj(payload)
             
             nodes = [
                 {"label": n.label, "properties": {"name": n.name, "user_id": user_id}}

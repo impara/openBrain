@@ -51,6 +51,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "*Commands:*\n"
         "• `/remember <text>` — Save a thought\n"
         "• `/search <query>` — Search your memories\n"
+        "• `/search_debug <query>` — Search with debug trace\n"
         "• `/help` — Show this message\n\n"
         "Everything is tied to your Telegram account, "
         "so your memories are private to you.",
@@ -64,6 +65,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🧠 *OpenBrain Commands*\n\n"
         "• `/remember <text>` — Save a thought or decision\n"
         "• `/search <query>` — Recall related memories\n"
+        "• `/search_debug <query>` — Recall with scoring/debug trace\n"
         "• `/help` — Show this message",
         parse_mode="Markdown",
     )
@@ -106,10 +108,32 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info("Telegram /search from %s query=%r", uid, query[:80])
 
     try:
-        result = search_brain(query, user_id=uid)
+        result = search_brain(query, user_id=uid, debug=False)
         await update.message.reply_text(result)
     except Exception as e:
         logger.exception("Failed to search brain")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def search_debug_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /search_debug <query> — search with full trace."""
+    query = " ".join(context.args) if context.args else ""
+    if not query:
+        await update.message.reply_text(
+            "⚠️ Please provide a search query.\n"
+            "Example: `/search_debug dark mode preferences`",
+            parse_mode="Markdown",
+        )
+        return
+
+    uid = _user_id(update)
+    logger.info("Telegram /search_debug from %s query=%r", uid, query[:80])
+
+    try:
+        result = search_brain(query, user_id=uid, debug=True)
+        await update.message.reply_text(result)
+    except Exception as e:
+        logger.exception("Failed to debug-search brain")
         await update.message.reply_text(f"❌ Error: {e}")
 
 
@@ -152,6 +176,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CommandHandler("remember", remember_handler))
     app.add_handler(CommandHandler("search", search_handler))
+    app.add_handler(CommandHandler("search_debug", search_debug_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     app.run_polling(drop_pending_updates=True)

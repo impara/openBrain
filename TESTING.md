@@ -108,5 +108,38 @@ docker compose down -v
 ```
 *(The `-v` flag removes the Postgres data volume, allowing you to start fresh with `init.sql`).*
 
+### Fast DB Truncate (Keep Containers + Volume)
+Use this when you want to re-test retrieval from a clean database without deleting Docker volumes.
+
+```bash
+docker stop open_brain_mcp open_brain_telegram
+
+docker exec open_brain_postgres psql -U brain_user -d open_brain -v ON_ERROR_STOP=1 -c "
+TRUNCATE TABLE public.memories RESTART IDENTITY;
+TRUNCATE TABLE memory_store.memories RESTART IDENTITY CASCADE;
+TRUNCATE TABLE memory_store.graph_dlq RESTART IDENTITY;
+TRUNCATE TABLE memory_store.raw_captures RESTART IDENTITY;
+DO \$\$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname='brain_graph' LOOP
+    EXECUTE format('TRUNCATE TABLE brain_graph.%I RESTART IDENTITY CASCADE', r.tablename);
+  END LOOP;
+END
+\$\$;
+"
+
+docker exec open_brain_postgres psql -U brain_user -d open_brain -c "
+SELECT 'public.memories' AS table_name, COUNT(*) AS rows FROM public.memories
+UNION ALL SELECT 'memory_store.memories', COUNT(*) FROM memory_store.memories
+UNION ALL SELECT 'memory_store.graph_dlq', COUNT(*) FROM memory_store.graph_dlq
+UNION ALL SELECT 'memory_store.raw_captures', COUNT(*) FROM memory_store.raw_captures;
+"
+
+ docker start open_brain_mcp open_brain_telegram
+
+
+```
+
 > [!IMPORTANT]
 > **LLM Quota Requirement**: The `capture_thought` tool uses the LLM to extract facts from text. If your OpenAI Key only has embedding access (or is out of quota), the `m.add()` call will fail. Ensure your key has access to `gpt-4o-mini` (default) or update the config in `brain_core.py`.
