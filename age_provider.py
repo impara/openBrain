@@ -178,6 +178,31 @@ class ApacheAGEProvider:
             raise ValueError(f"Invalid Cypher label: {label!r}")
         return label
 
+    @classmethod
+    def _coerce_label(cls, label: str, fallback: str = "Entity") -> str:
+        """Normalize LLM-provided labels into safe Cypher identifiers.
+
+        AGE labels cannot contain spaces or punctuation. Instead of dropping entities,
+        we convert common label forms like "CB Channel" -> "CB_Channel".
+        """
+        raw = (label or "").strip()
+        if not raw:
+            raw = fallback
+
+        cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", raw)
+        cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+
+        if not cleaned:
+            cleaned = fallback
+        if not cleaned[0].isalpha():
+            cleaned = f"L_{cleaned}"
+
+        cleaned = cleaned[:64]
+        if not cleaned:
+            cleaned = fallback
+
+        return cls._validate_label(cleaned)
+
     @staticmethod
     def _escape_cypher_string(value: str) -> str:
         """Escape a value for embedding in a Cypher single-quoted literal.
@@ -280,9 +305,7 @@ class ApacheAGEProvider:
         for node in nodes:
             try:
                 with self._get_cursor() as (conn, cur):
-                    label = self._validate_label(
-                        node.get("label", "Entity")
-                    )
+                    label = self._coerce_label(node.get("label", "Entity"), fallback="Entity")
                     prop_str = self._sanitize_props(node.get("properties", {}))
 
                     query = f"""
@@ -306,13 +329,13 @@ class ApacheAGEProvider:
                 with self._get_cursor() as (conn, cur):
                     source = self._escape_cypher_string(edge["source"])
                     target = self._escape_cypher_string(edge["target"])
-                    rel = self._validate_label(edge["relationship"])
+                    rel = self._coerce_label(edge.get("relationship", "RELATED_TO"), fallback="RELATED_TO")
 
                     source_label = edge.get("source_label", "")
                     target_label = edge.get("target_label", "")
 
-                    s_match = f":{self._validate_label(source_label)}" if source_label else ""
-                    t_match = f":{self._validate_label(target_label)}" if target_label else ""
+                    s_match = f":{self._coerce_label(source_label, fallback='Entity')}" if source_label else ""
+                    t_match = f":{self._coerce_label(target_label, fallback='Entity')}" if target_label else ""
 
                     query = f"""
                     SELECT * FROM cypher('{self.graph_name}', $$

@@ -54,6 +54,43 @@ m.enable_graph = True
 logger.info("OpenBrain initialized — Mem0 + AGE dual-stack ready")
 
 
+def _extract_added_count(result) -> int:
+    """Best-effort count of memories persisted by Mem0 add()."""
+    if result is None:
+        return 0
+    if isinstance(result, list):
+        return len(result)
+    if isinstance(result, dict):
+        for key in ("results", "memories", "data", "added"):
+            value = result.get(key)
+            if isinstance(value, list):
+                return len(value)
+        return 1 if result else 0
+    return 1
+
+
+def _format_relation(relation) -> str:
+    """Normalize graph relation payloads into readable text."""
+    if isinstance(relation, str):
+        return relation
+    if not isinstance(relation, dict):
+        return str(relation)
+
+    source = relation.get("source") or relation.get("from") or relation.get("subject")
+    target = relation.get("target") or relation.get("to") or relation.get("object")
+    rel = relation.get("relationship") or relation.get("relation") or relation.get("type")
+
+    if isinstance(source, dict):
+        source = source.get("name") or source.get("id") or str(source)
+    if isinstance(target, dict):
+        target = target.get("name") or target.get("id") or str(target)
+
+    if source and rel and target:
+        return f"{source} -[{rel}]-> {target}"
+
+    return relation.get("memory") or relation.get("text") or relation.get("content") or str(relation)
+
+
 def capture_thought(thought: str, user_id: str = "default") -> str:
     """
     Saves a new memory into the user's Open Brain.
@@ -63,6 +100,13 @@ def capture_thought(thought: str, user_id: str = "default") -> str:
     try:
         result = m.add(messages=[{"role": "user", "content": thought}], user_id=user_id)
         logger.debug("Mem0 add result: %s", result)
+        added_count = _extract_added_count(result)
+        if added_count == 0:
+            logger.warning("No searchable memories were extracted for user=%s", user_id)
+            return (
+                "Input was captured, but no searchable memory was extracted. "
+                "Try sending shorter factual chunks."
+            )
         return "Successfully captured thought into memory."
     except Exception as e:
         logger.error("Memory capture failed (potential ghost memory): %s", e)
@@ -79,8 +123,10 @@ def search_brain(query: str, user_id: str = "default") -> str:
 
     # Mem0 1.0.5 with graph enabled returns a dict {"results": [...], "relations": [...]}
     results = memories
+    relations = []
     if isinstance(memories, dict):
         results = memories.get("results", [])
+        relations = memories.get("relations", [])
 
     # Filter by relevance — pgvector cosine distance: lower = more similar
     SCORE_THRESHOLD = 0.75
@@ -89,16 +135,30 @@ def search_brain(query: str, user_id: str = "default") -> str:
         if not isinstance(r, dict) or r.get("score", 0) <= SCORE_THRESHOLD
     ]
 
-    if not relevant:
-        return "No relevant memories found in the Open Brain."
+    if not relevant and results:
+        # Fallback: avoid hiding all memories when provider score semantics differ.
+        relevant = results[:3]
 
-    context = ""
+    context_parts = []
     for memory in relevant:
         if isinstance(memory, dict):
             text = memory.get("memory", memory.get("text", memory.get("content", str(memory))))
         else:
             text = str(memory)
-        context += f"• {text}\n\n"
+        if text:
+            context_parts.append(f"• {text}")
 
-    logger.debug("Returning %d relevant items (filtered from %d)", len(relevant), len(results))
-    return context.strip()
+    for relation in relations:
+        relation_text = _format_relation(relation)
+        if relation_text:
+            context_parts.append(f"• {relation_text}")
+
+    if not context_parts:
+        return "No relevant memories found in the Open Brain."
+
+    logger.debug(
+        "Returning %d memory items and %d relation items",
+        len(relevant),
+        len(relations),
+    )
+    return "\n\n".join(context_parts).strip()

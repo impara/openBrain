@@ -102,6 +102,20 @@ class TestLabelValidation:
             ApacheAGEProvider._validate_label("A" * 65)
 
 
+class TestLabelCoercion:
+    def test_coerces_spaces_to_underscores(self):
+        assert ApacheAGEProvider._coerce_label("CB Channel") == "CB_Channel"
+
+    def test_coerces_punctuation(self):
+        assert ApacheAGEProvider._coerce_label("Modulation Type!!!") == "Modulation_Type"
+
+    def test_prefixes_numeric_start(self):
+        assert ApacheAGEProvider._coerce_label("123MHz") == "L_123MHz"
+
+    def test_fallbacks_when_empty(self):
+        assert ApacheAGEProvider._coerce_label("   ", fallback="Entity") == "Entity"
+
+
 # ── Cypher String Escaping ────────────────────
 
 
@@ -158,6 +172,42 @@ class TestSanitizeProps:
         result = provider._sanitize_props({"name": "Alice", "age": "30"})
         assert "name: 'Alice'" in result
         assert "age: '30'" in result
+
+
+class TestGraphWriteNormalization:
+    def test_add_nodes_uses_coerced_label(self, provider, mock_pool):
+        _, _, mock_cursor = mock_pool
+        mock_cursor.execute.reset_mock()
+
+        provider.add_nodes(
+            [{"label": "CB Channel", "properties": {"name": "27.205", "user_id": "default"}}]
+        )
+
+        # First execute call is 'LOAD 'age';', second is SET search_path, third is the cypher MERGE query
+        cypher_query = mock_cursor.execute.call_args_list[2][0][0]
+        assert "MERGE (n:CB_Channel" in cypher_query
+
+    def test_add_edges_uses_coerced_labels(self, provider, mock_pool):
+        _, _, mock_cursor = mock_pool
+        mock_cursor.execute.reset_mock()
+
+        provider.add_edges(
+            [
+                {
+                    "source": "Channel 19",
+                    "source_label": "CB Channel",
+                    "target": "SSB",
+                    "target_label": "Modulation Type",
+                    "relationship": "uses modulation",
+                }
+            ]
+        )
+
+        # First execute call is 'LOAD 'age';', second is SET search_path, third is the cypher MATCH/MERGE query
+        cypher_query = mock_cursor.execute.call_args_list[2][0][0]
+        assert "MATCH (a:CB_Channel" in cypher_query
+        assert "(b:Modulation_Type" in cypher_query
+        assert "-[r:uses_modulation]->" in cypher_query
 
 
 # ── Search Term Validation ────────────────────
