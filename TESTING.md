@@ -98,8 +98,8 @@ docker compose logs --tail=10 open-brain-telegram
 
 Then in Telegram:
 1. Send `/start` to your bot — should get a welcome message
-2. Send `/remember I prefer dark mode` — should confirm capture
-3. Send `/search dark mode` — should return the memory
+2. Send `/remember I prefer dark mode` — should confirm capture or queueing
+3. Send `/search dark mode` — should return the memory immediately from raw capture or shortly after background indexing
 
 ### Cleanup After Testing
 To reset the environment completely:

@@ -22,6 +22,40 @@ CREATE EXTENSION IF NOT EXISTS age;
 -- 2. Establish Schema Discipline
 CREATE SCHEMA IF NOT EXISTS memory_store;
 
+-- 2a. Create capture audit + async ingestion tables
+CREATE TABLE IF NOT EXISTS memory_store.raw_captures (
+    id BIGSERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'capture_thought',
+    content TEXT NOT NULL,
+    content_len INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_captures_user_created
+ON memory_store.raw_captures (user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS memory_store.capture_jobs (
+    id BIGSERIAL PRIMARY KEY,
+    raw_capture_id BIGINT NOT NULL UNIQUE REFERENCES memory_store.raw_captures(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    available_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    CONSTRAINT capture_jobs_status_check
+        CHECK (status IN ('pending', 'processing', 'done', 'retry', 'failed'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_capture_jobs_status_available_created
+ON memory_store.capture_jobs (status, available_at, created_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_jobs_raw_capture_id
+ON memory_store.capture_jobs (raw_capture_id);
+
 -- 3. Create the Parent Partitioned Table
 CREATE TABLE memory_store.memories (
     id BIGSERIAL,

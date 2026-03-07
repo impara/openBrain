@@ -13,11 +13,12 @@ import pytest
 # ── Mock brain_core before importing telegram_bot ──
 brain_core_mock = MagicMock()
 brain_core_mock.capture_thought = MagicMock(
-    return_value="Successfully captured thought into memory."
+    return_value="Thought captured and queued for indexing."
 )
 brain_core_mock.search_brain = MagicMock(
     return_value="=== Retrieved Brain Context ===\n- Test memory\n"
 )
+brain_core_mock.start_background_workers = MagicMock()
 sys.modules.setdefault("brain_core", brain_core_mock)
 
 # Must set token before import
@@ -99,8 +100,9 @@ class TestRememberHandler:
     @pytest.mark.asyncio
     async def test_captures_thought(self, mock_update, mock_context):
         mock_context.args = ["I", "prefer", "dark", "mode"]
-        with patch("telegram_bot.capture_thought", return_value="Successfully captured thought into memory."):
+        with patch("telegram_bot.asyncio.to_thread", new=AsyncMock(return_value="Thought captured and queued for indexing.")) as mock_to_thread:
             await remember_handler(mock_update, mock_context)
+        mock_to_thread.assert_awaited_once_with(remember_handler.__globals__["capture_thought"], "I prefer dark mode", user_id="default")
         text = mock_update.message.reply_text.call_args[0][0]
         assert "✅" in text
 
@@ -114,17 +116,24 @@ class TestRememberHandler:
     @pytest.mark.asyncio
     async def test_uses_telegram_user_id(self, mock_update, mock_context):
         mock_context.args = ["test", "thought"]
-        with patch("telegram_bot.capture_thought", return_value="ok") as mock_capture:
+        with patch("telegram_bot.asyncio.to_thread", new=AsyncMock(return_value="ok")) as mock_to_thread:
             await remember_handler(mock_update, mock_context)
-            mock_capture.assert_called_once_with("test thought", user_id="default")
+            mock_to_thread.assert_awaited_once_with(remember_handler.__globals__["capture_thought"], "test thought", user_id="default")
 
     @pytest.mark.asyncio
     async def test_handles_error(self, mock_update, mock_context):
         mock_context.args = ["test"]
-        with patch("telegram_bot.capture_thought", side_effect=RuntimeError("DB down")):
+        with patch("telegram_bot.asyncio.to_thread", new=AsyncMock(side_effect=RuntimeError("DB down"))):
             await remember_handler(mock_update, mock_context)
         text = mock_update.message.reply_text.call_args[0][0]
         assert "❌" in text
+
+    @pytest.mark.asyncio
+    async def test_offloads_capture_to_thread(self, mock_update, mock_context):
+        mock_context.args = ["slow", "capture"]
+        with patch("telegram_bot.asyncio.to_thread", new=AsyncMock(return_value="queued")) as mock_to_thread:
+            await remember_handler(mock_update, mock_context)
+        mock_to_thread.assert_awaited_once_with(remember_handler.__globals__["capture_thought"], "slow capture", user_id="default")
 
 
 class TestSearchHandler:
@@ -173,8 +182,9 @@ class TestAutoCapture:
     @pytest.mark.asyncio
     async def test_captures_when_enabled(self, mock_update, mock_context):
         with patch("telegram_bot.AUTO_CAPTURE", True), \
-             patch("telegram_bot.capture_thought", return_value="ok"):
+             patch("telegram_bot.asyncio.to_thread", new=AsyncMock(return_value="ok")) as mock_to_thread:
             await text_handler(mock_update, mock_context)
+        mock_to_thread.assert_awaited_once_with(text_handler.__globals__["capture_thought"], "Hello world", user_id="default")
         mock_update.message.reply_text.assert_called_once()
         text = mock_update.message.reply_text.call_args[0][0]
         assert "💭" in text

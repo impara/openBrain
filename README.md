@@ -127,6 +127,9 @@ All configuration is via environment variables (`.env` file):
 | `MCP_PORT` | No | `8000` | Host port mapped to MCP server container port 8000 |
 | `OPENAI_API_KEY` | **Yes** | — | OpenAI API key for Mem0 |
 | `MEMORY_RETENTION_MONTHS` | No | `12` | Partition retention window |
+| `OPENBRAIN_CAPTURE_MODE` | No | `async` | `async` queues `/remember` for background indexing, `sync` blocks until ingestion finishes |
+| `OPENBRAIN_INGEST_WORKERS` | No | `1` | Number of in-process capture workers per service |
+| `OPENBRAIN_INGEST_POLL_MS` | No | `250` | Poll interval for queued capture jobs |
 | `LOG_LEVEL` | No | `INFO` | Python log level |
 | `TELEGRAM_BOT_TOKEN` | No | — | Telegram bot token from @BotFather |
 | `TELEGRAM_AUTO_CAPTURE` | No | `false` | Auto-save plain text messages as thoughts |
@@ -191,6 +194,7 @@ Chat with your brain from Telegram using `/remember` and `/search` commands.
 | `/help` | Show available commands |
 
 Memories are isolated by Telegram user ID (`telegram_<id>`).
+In the default `OPENBRAIN_CAPTURE_MODE=async`, `/remember` acknowledges immediately after durable queueing and finishes semantic indexing in the background.
 
 Set `TELEGRAM_AUTO_CAPTURE=true` in `.env` to auto-save all plain text messages.
 

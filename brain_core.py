@@ -9,15 +9,18 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-import psycopg2
 from dotenv import load_dotenv
 from mem0 import Memory
 from openai import OpenAI
+from psycopg2 import pool
 
 from age_provider import ApacheAGEProvider
 
@@ -37,7 +40,22 @@ DB_CONFIG = {
 if not os.environ.get("OPENAI_API_KEY"):
     raise ValueError("OPENAI_API_KEY environment variable is required.")
 
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
 _LLM_MODEL = os.environ.get("OPENBRAIN_SUMMARY_MODEL", "gpt-4o-mini")
+_CAPTURE_MODE = os.environ.get("OPENBRAIN_CAPTURE_MODE", "async").strip().lower()
+if _CAPTURE_MODE not in {"async", "sync"}:
+    _CAPTURE_MODE = "async"
+_INGEST_WORKERS = _env_int("OPENBRAIN_INGEST_WORKERS", 1)
+_INGEST_POLL_MS = _env_int("OPENBRAIN_INGEST_POLL_MS", 250, minimum=50)
+_CAPTURE_RETRY_BACKOFF_SECONDS = (60, 300, 900)
+_CAPTURE_ACK_TEXT = "Thought captured and queued for indexing."
 _MAX_EVIDENCE = 5
 _SCORE_THRESHOLD = 0.52
 _SOURCE_WEIGHT = {"vector": 1.0, "graph": 0.82, "raw": 0.68}
@@ -87,6 +105,15 @@ class EvidenceItem:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class CaptureJob:
+    id: int
+    raw_capture_id: int
+    user_id: str
+    thought: str
+    attempt_count: int = 0
+
+
 # ── Mem0 + AGE Dual-Stack ─────────────────────
 # Note: Mem0 1.0.5 does not natively support injecting a live 'instance' of a custom provider
 # via config_dict cleanly. We monkey-patch m.graph here. If Mem0 updates to support
@@ -111,64 +138,149 @@ m = Memory.from_config(config_dict)
 m.graph = age_graph
 m.enable_graph = True
 _openai = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+_db_pool = pool.ThreadedConnectionPool(
+    minconn=1,
+    maxconn=max(4, _INGEST_WORKERS + 4),
+    **DB_CONFIG,
+)
+_worker_lock = threading.Lock()
+_worker_threads: list[threading.Thread] = []
+_worker_stop_event = threading.Event()
 
-logger.info("OpenBrain initialized — Mem0 + AGE dual-stack ready")
+logger.info(
+    "OpenBrain initialized — Mem0 + AGE dual-stack ready (capture_mode=%s, ingest_workers=%d)",
+    _CAPTURE_MODE,
+    _INGEST_WORKERS,
+)
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _ensure_raw_capture_table() -> None:
-    """Create raw capture table for debugging remember/search quality."""
-    conn = psycopg2.connect(**DB_CONFIG)
+@contextmanager
+def _db_cursor(*, commit: bool = False):
+    """Yield a pooled DB cursor and return the connection to the pool cleanly."""
+    conn = _db_pool.getconn()
     try:
         with conn.cursor() as cur:
-            cur.execute("CREATE SCHEMA IF NOT EXISTS memory_store;")
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memory_store.raw_captures (
-                    id BIGSERIAL PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    source TEXT NOT NULL DEFAULT 'capture_thought',
-                    content TEXT NOT NULL,
-                    content_len INTEGER NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-                """
-            )
-            cur.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_raw_captures_user_created
-                ON memory_store.raw_captures (user_id, created_at DESC);
-                """
-            )
+            yield conn, cur
+        if commit:
             conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        conn.close()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except Exception:
+            pass
+        _db_pool.putconn(conn)
 
 
-def _save_raw_capture(thought: str, user_id: str, source: str = "capture_thought") -> int | None:
-    """Persist the exact incoming text for audit/debug visibility."""
-    if not thought:
+def _ensure_storage_infrastructure() -> None:
+    """Create capture tables and indexes for fresh and upgraded deployments."""
+    with _db_cursor(commit=True) as (_, cur):
+        cur.execute("CREATE SCHEMA IF NOT EXISTS memory_store;")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_store.raw_captures (
+                id BIGSERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'capture_thought',
+                content TEXT NOT NULL,
+                content_len INTEGER NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_raw_captures_user_created
+            ON memory_store.raw_captures (user_id, created_at DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_store.capture_jobs (
+                id BIGSERIAL PRIMARY KEY,
+                raw_capture_id BIGINT NOT NULL UNIQUE REFERENCES memory_store.raw_captures(id) ON DELETE CASCADE,
+                user_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                available_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_error TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                started_at TIMESTAMPTZ,
+                finished_at TIMESTAMPTZ,
+                CONSTRAINT capture_jobs_status_check
+                    CHECK (status IN ('pending', 'processing', 'done', 'retry', 'failed'))
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_capture_jobs_status_available_created
+            ON memory_store.capture_jobs (status, available_at, created_at);
+            """
+        )
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_jobs_raw_capture_id
+            ON memory_store.capture_jobs (raw_capture_id);
+            """
+        )
+
+
+def _enqueue_capture_job(raw_capture_id: int, user_id: str, cur: Any | None = None) -> int | None:
+    """Create or reuse one ingest job per raw capture."""
+    if raw_capture_id is None:
         return None
 
-    conn = psycopg2.connect(**DB_CONFIG)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO memory_store.raw_captures (user_id, source, content, content_len)
-                VALUES (%s, %s, %s, %s)
-                RETURNING id;
-                """,
-                (user_id, source, thought, len(thought)),
-            )
-            row = cur.fetchone()
-            conn.commit()
-            return row[0] if row else None
-    finally:
-        conn.close()
+    def _run(cursor: Any) -> int | None:
+        cursor.execute(
+            """
+            INSERT INTO memory_store.capture_jobs (raw_capture_id, user_id)
+            VALUES (%s, %s)
+            ON CONFLICT (raw_capture_id)
+            DO UPDATE SET user_id = EXCLUDED.user_id
+            RETURNING id;
+            """,
+            (raw_capture_id, user_id),
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    if cur is not None:
+        return _run(cur)
+
+    with _db_cursor(commit=True) as (_, cursor):
+        return _run(cursor)
+
+
+def _capture_raw_and_enqueue(
+    thought: str,
+    user_id: str,
+    source: str = "capture_thought",
+) -> tuple[int | None, int | None]:
+    """Persist raw text and enqueue ingestion atomically."""
+    if not thought:
+        return None, None
+
+    with _db_cursor(commit=True) as (_, cur):
+        cur.execute(
+            """
+            INSERT INTO memory_store.raw_captures (user_id, source, content, content_len)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id;
+            """,
+            (user_id, source, thought, len(thought)),
+        )
+        row = cur.fetchone()
+        raw_capture_id = row[0] if row else None
+        job_id = _enqueue_capture_job(raw_capture_id, user_id=user_id, cur=cur)
+        return raw_capture_id, job_id
 
 
 def _tokenize(text: str) -> list[str]:
@@ -274,46 +386,42 @@ def _search_raw_captures(query: str, user_id: str, limit: int = 8) -> list[dict]
     """Find recent raw captures matching query terms."""
     terms = _tokenize(query)[:8]
 
-    conn = psycopg2.connect(**DB_CONFIG)
-    try:
-        with conn.cursor() as cur:
-            if terms:
-                where_parts = " OR ".join(["LOWER(content) LIKE %s"] * len(terms))
-                params = [user_id, *[f"%{t}%" for t in terms], limit]
-                cur.execute(
-                    f"""
-                    SELECT id, content, created_at, content_len
-                    FROM memory_store.raw_captures
-                    WHERE user_id = %s AND ({where_parts})
-                    ORDER BY created_at DESC
-                    LIMIT %s;
-                    """,
-                    params,
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT id, content, created_at, content_len
-                    FROM memory_store.raw_captures
-                    WHERE user_id = %s
-                    ORDER BY created_at DESC
-                    LIMIT %s;
-                    """,
-                    (user_id, limit),
-                )
+    with _db_cursor() as (_, cur):
+        if terms:
+            where_parts = " OR ".join(["LOWER(content) LIKE %s"] * len(terms))
+            params = [user_id, *[f"%{t}%" for t in terms], limit]
+            cur.execute(
+                f"""
+                SELECT id, content, created_at, content_len
+                FROM memory_store.raw_captures
+                WHERE user_id = %s AND ({where_parts})
+                ORDER BY created_at DESC
+                LIMIT %s;
+                """,
+                params,
+            )
+        else:
+            cur.execute(
+                """
+                SELECT id, content, created_at, content_len
+                FROM memory_store.raw_captures
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT %s;
+                """,
+                (user_id, limit),
+            )
 
-            rows = cur.fetchall()
-            return [
-                {
-                    "id": row[0],
-                    "content": row[1],
-                    "created_at": row[2],
-                    "content_len": row[3],
-                }
-                for row in rows
-            ]
-    finally:
-        conn.close()
+        rows = cur.fetchall()
+        return [
+            {
+                "id": row[0],
+                "content": row[1],
+                "created_at": row[2],
+                "content_len": row[3],
+            }
+            for row in rows
+        ]
 
 
 def _extract_added_count(result: Any) -> int:
@@ -853,7 +961,254 @@ def _fallback_ingest_facts(thought: str, user_id: str, raw_capture_id: int | Non
     return added
 
 
-_ensure_raw_capture_table()
+def _ingest_capture(thought: str, user_id: str, raw_capture_id: int | None) -> tuple[int, int]:
+    """Run the expensive memory ingestion flow for one captured thought."""
+    result = m.add(
+        messages=[{"role": "user", "content": thought}],
+        user_id=user_id,
+        metadata={"raw_capture_id": raw_capture_id, "ingest_mode": "primary"},
+    )
+    logger.debug("Mem0 add result for raw_capture_id=%s: %s", raw_capture_id, result)
+
+    added_count = _extract_added_count(result)
+    fallback_added = 0
+    if added_count == 0:
+        logger.info(
+            "Mem0 add returned no explicit new items for user=%s raw_capture_id=%s, triggering fallback ingestion",
+            user_id,
+            raw_capture_id,
+        )
+        fallback_added = _fallback_ingest_facts(thought, user_id=user_id, raw_capture_id=raw_capture_id)
+        if fallback_added > 0:
+            logger.info(
+                "Fallback ingestion added %d factual memories for user=%s raw_capture_id=%s",
+                fallback_added,
+                user_id,
+                raw_capture_id,
+            )
+        else:
+            logger.info(
+                "Fallback ingestion produced no new vector memories for user=%s raw_capture_id=%s",
+                user_id,
+                raw_capture_id,
+            )
+
+    return added_count, fallback_added
+
+
+def _claim_capture_job(job_id: int | None = None) -> CaptureJob | None:
+    """Claim the next available capture job, or a specific job when provided."""
+    filters = ["j.status IN ('pending', 'retry')"]
+    params: list[Any] = []
+    if job_id is None:
+        filters.append("j.available_at <= CURRENT_TIMESTAMP")
+    else:
+        filters.append("j.id = %s")
+        params.append(job_id)
+
+    where_clause = " AND ".join(filters)
+    with _db_cursor(commit=True) as (_, cur):
+        cur.execute(
+            f"""
+            WITH next_job AS (
+                SELECT j.id
+                FROM memory_store.capture_jobs j
+                WHERE {where_clause}
+                ORDER BY j.available_at ASC, j.created_at ASC
+                FOR UPDATE OF j SKIP LOCKED
+                LIMIT 1
+            )
+            UPDATE memory_store.capture_jobs j
+            SET status = 'processing',
+                started_at = CURRENT_TIMESTAMP,
+                finished_at = NULL,
+                last_error = NULL,
+                attempt_count = j.attempt_count + 1
+            FROM next_job, memory_store.raw_captures r
+            WHERE j.id = next_job.id AND r.id = j.raw_capture_id
+            RETURNING j.id, j.raw_capture_id, j.user_id, r.content, j.attempt_count;
+            """,
+            params,
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return CaptureJob(
+            id=row[0],
+            raw_capture_id=row[1],
+            user_id=row[2],
+            thought=row[3],
+            attempt_count=row[4],
+        )
+
+
+def _mark_capture_job_done(job: CaptureJob, added_count: int, fallback_added: int, duration_ms: float) -> None:
+    with _db_cursor(commit=True) as (_, cur):
+        cur.execute(
+            """
+            UPDATE memory_store.capture_jobs
+            SET status = 'done',
+                finished_at = CURRENT_TIMESTAMP,
+                last_error = NULL
+            WHERE id = %s;
+            """,
+            (job.id,),
+        )
+    logger.info(
+        "Capture job done job_id=%s raw_capture_id=%s attempt=%d added=%d fallback_added=%d ingest_ms=%.1f",
+        job.id,
+        job.raw_capture_id,
+        job.attempt_count,
+        added_count,
+        fallback_added,
+        duration_ms,
+    )
+
+
+def _mark_capture_job_retry(job: CaptureJob, error: Exception, duration_ms: float) -> None:
+    message = str(error)
+    if job.attempt_count <= len(_CAPTURE_RETRY_BACKOFF_SECONDS):
+        delay_seconds = _CAPTURE_RETRY_BACKOFF_SECONDS[job.attempt_count - 1]
+        status = "retry"
+        sql = """
+            UPDATE memory_store.capture_jobs
+            SET status = %s,
+                available_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 second'),
+                finished_at = NULL,
+                last_error = %s
+            WHERE id = %s;
+        """
+        params = (status, delay_seconds, message, job.id)
+    else:
+        delay_seconds = None
+        status = "failed"
+        sql = """
+            UPDATE memory_store.capture_jobs
+            SET status = %s,
+                finished_at = CURRENT_TIMESTAMP,
+                last_error = %s
+            WHERE id = %s;
+        """
+        params = (status, message, job.id)
+
+    with _db_cursor(commit=True) as (_, cur):
+        cur.execute(sql, params)
+
+    logger.warning(
+        "Capture job %s job_id=%s raw_capture_id=%s attempt=%d retry_in=%s ingest_ms=%.1f error=%s",
+        status,
+        job.id,
+        job.raw_capture_id,
+        job.attempt_count,
+        delay_seconds,
+        duration_ms,
+        message,
+    )
+
+
+def _process_capture_job(job: CaptureJob) -> bool:
+    started_at = time.perf_counter()
+    try:
+        added_count, fallback_added = _ingest_capture(
+            thought=job.thought,
+            user_id=job.user_id,
+            raw_capture_id=job.raw_capture_id,
+        )
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        _mark_capture_job_done(job, added_count=added_count, fallback_added=fallback_added, duration_ms=duration_ms)
+        return True
+    except Exception as e:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        _mark_capture_job_retry(job, error=e, duration_ms=duration_ms)
+        return False
+
+
+def process_next_capture_job() -> bool:
+    """Claim and process the next available capture job."""
+    job = _claim_capture_job()
+    if not job:
+        return False
+    return _process_capture_job(job)
+
+
+def _process_capture_job_by_id(job_id: int) -> bool:
+    job = _claim_capture_job(job_id=job_id)
+    if not job:
+        return False
+    return _process_capture_job(job)
+
+
+def get_capture_job_stats() -> dict[str, int]:
+    """Return current job counts by status for observability."""
+    stats = {"pending": 0, "processing": 0, "done": 0, "retry": 0, "failed": 0}
+    with _db_cursor() as (_, cur):
+        cur.execute(
+            """
+            SELECT status, COUNT(*)
+            FROM memory_store.capture_jobs
+            GROUP BY status;
+            """
+        )
+        for status, count in cur.fetchall():
+            stats[str(status)] = int(count)
+    stats["queued"] = stats["pending"] + stats["retry"]
+    return stats
+
+
+def _capture_ingest_worker(worker_index: int) -> None:
+    logger.info(
+        "Capture ingest worker started worker=%d poll_ms=%d capture_mode=%s",
+        worker_index,
+        _INGEST_POLL_MS,
+        _CAPTURE_MODE,
+    )
+    poll_seconds = _INGEST_POLL_MS / 1000
+    while not _worker_stop_event.is_set():
+        try:
+            processed = process_next_capture_job()
+        except Exception:
+            logger.exception("Capture ingest worker crashed during processing worker=%d", worker_index)
+            processed = False
+        if not processed:
+            _worker_stop_event.wait(poll_seconds)
+
+
+def start_background_workers() -> None:
+    """Start idempotent in-process ingestion workers when async mode is enabled."""
+    if _CAPTURE_MODE != "async" or _INGEST_WORKERS <= 0:
+        return
+
+    with _worker_lock:
+        active_threads = [thread for thread in _worker_threads if thread.is_alive()]
+        if active_threads:
+            _worker_threads[:] = active_threads
+            return
+
+        _worker_threads.clear()
+        _worker_stop_event.clear()
+        for idx in range(_INGEST_WORKERS):
+            thread = threading.Thread(
+                target=_capture_ingest_worker,
+                args=(idx + 1,),
+                daemon=True,
+                name=f"openbrain-capture-{idx + 1}",
+            )
+            thread.start()
+            _worker_threads.append(thread)
+
+
+def stop_background_workers(timeout: float = 1.0) -> None:
+    """Stop background workers. Primarily used by tests."""
+    with _worker_lock:
+        if not _worker_threads:
+            return
+        _worker_stop_event.set()
+        for thread in list(_worker_threads):
+            thread.join(timeout=timeout)
+        _worker_threads.clear()
+
+
+_ensure_storage_infrastructure()
 
 
 def capture_thought(thought: str, user_id: str = "default") -> str:
@@ -861,42 +1216,39 @@ def capture_thought(thought: str, user_id: str = "default") -> str:
     Saves a new memory into the user's Open Brain.
     Call this when the user makes a decision, meets someone, or specifies a constraint.
     """
+    thought = (thought or "").strip()
+    if not thought:
+        return "Warning: Please provide a non-empty thought."
+
     logger.info("Capturing thought for user=%s (len=%d)", user_id, len(thought))
-    raw_capture_id = None
-    try:
-        raw_capture_id = _save_raw_capture(thought, user_id=user_id, source="capture_thought")
-    except Exception as e:
-        logger.warning("Raw capture save failed for user=%s: %s", user_id, e)
+    started_at = time.perf_counter()
 
     try:
-        result = m.add(
-            messages=[{"role": "user", "content": thought}],
-            user_id=user_id,
-            metadata={"raw_capture_id": raw_capture_id, "ingest_mode": "primary"},
+        raw_capture_id, job_id = _capture_raw_and_enqueue(thought, user_id=user_id, source="capture_thought")
+        queue_stats = get_capture_job_stats()
+        accept_ms = (time.perf_counter() - started_at) * 1000
+        logger.info(
+            "Capture accepted user=%s raw_capture_id=%s job_id=%s accept_ms=%.1f queue_depth=%d processing=%d failed=%d",
+            user_id,
+            raw_capture_id,
+            job_id,
+            accept_ms,
+            queue_stats.get("queued", 0),
+            queue_stats.get("processing", 0),
+            queue_stats.get("failed", 0),
         )
-        logger.debug("Mem0 add result: %s", result)
-        added_count = _extract_added_count(result)
-        if added_count == 0:
-            logger.info(
-                "Mem0 add returned no explicit new items for user=%s, triggering fallback ingestion",
-                user_id,
-            )
-            fallback_added = _fallback_ingest_facts(thought, user_id=user_id, raw_capture_id=raw_capture_id)
-            if fallback_added > 0:
-                logger.info(
-                    "Fallback ingestion added %d factual memories for user=%s",
-                    fallback_added,
-                    user_id,
-                )
-            else:
-                logger.info(
-                    "Fallback ingestion produced no new vector memories for user=%s",
-                    user_id,
-                )
-        return "Successfully captured thought into memory."
     except Exception as e:
-        logger.error("Memory capture failed (potential ghost memory): %s", e)
-        return f"Warning: Failed to fully commit memory. Error: {e}"
+        logger.error("Memory capture enqueue failed for user=%s: %s", user_id, e)
+        return f"Warning: Failed to persist memory. Error: {e}"
+
+    if _CAPTURE_MODE == "sync":
+        if job_id is None:
+            return "Warning: Failed to enqueue memory for processing."
+        if _process_capture_job_by_id(job_id):
+            return "Successfully captured thought into memory."
+        return "Warning: Failed to fully commit memory during synchronous processing."
+
+    return _CAPTURE_ACK_TEXT
 
 
 def search_brain(query: str, user_id: str = "default", debug: bool = False) -> str:

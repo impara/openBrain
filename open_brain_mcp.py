@@ -2,7 +2,7 @@ import os
 import logging
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-from brain_core import capture_thought, search_brain
+from brain_core import capture_thought, search_brain, start_background_workers
 
 # ── Bootstrap ─────────────────────────────────
 load_dotenv()
@@ -48,4 +48,5 @@ if __name__ == "__main__":
     # Allow switching transport via environment variable for local testing/IDE integration
     transport = os.environ.get("MCP_TRANSPORT", "streamable-http")
     logger.info("Starting OpenBrain MCP server with transport=%s", transport)
+    start_background_workers()
     mcp.run(transport=transport)

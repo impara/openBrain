@@ -5,6 +5,7 @@ Allows users to capture thoughts and search their brain from Telegram.
 Uses long-polling (no public URL needed — works behind NAT / homelab).
 """
 
+import asyncio
 import os
 import logging
 from dotenv import load_dotenv
@@ -16,7 +17,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from brain_core import capture_thought, search_brain
+from brain_core import capture_thought, search_brain, start_background_workers
 
 # ── Bootstrap ─────────────────────────────────
 load_dotenv()
@@ -86,7 +87,7 @@ async def remember_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     logger.info("Telegram /remember from %s (len=%d)", uid, len(text))
 
     try:
-        result = capture_thought(text, user_id=uid)
+        result = await asyncio.to_thread(capture_thought, text, user_id=uid)
         await update.message.reply_text(f"✅ {result}")
     except Exception as e:
         logger.exception("Failed to capture thought")
@@ -150,7 +151,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     logger.info("Telegram auto-capture from %s (len=%d)", uid, len(text))
 
     try:
-        capture_thought(text, user_id=uid)
+        await asyncio.to_thread(capture_thought, text, user_id=uid)
         await update.message.reply_text("💭 Thought captured.")
     except Exception as e:
         logger.exception("Failed to auto-capture thought")
@@ -169,6 +170,7 @@ def main() -> None:
     logger.info(
         "Starting OpenBrain Telegram bot (auto_capture=%s)", AUTO_CAPTURE
     )
+    start_background_workers()
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
