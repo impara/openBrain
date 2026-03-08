@@ -26,5 +26,8 @@ RUN sed -i "s/^shared_preload_libraries = '\(.*\)'/shared_preload_libraries = '\
     echo "shared_preload_libraries = 'age,pg_cron'" >> /usr/share/postgresql/16/postgresql.conf.sample \
     && echo "cron.database_name = 'open_brain'" >> /usr/share/postgresql/16/postgresql.conf.sample
 
+# Ship initialization SQL in the image so deployments do not depend on a host bind mount.
+COPY init.sql /docker-entrypoint-initdb.d/init.sql
+
 # Revert to the postgres user expected by the base image
 USER postgres

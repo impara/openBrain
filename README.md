@@ -143,7 +143,7 @@ All configuration is via environment variables (`.env` file):
 | `POSTGRES_PASSWORD` | **Yes** | — | Database password |
 | `POSTGRES_HOST` | No | `localhost` | DB host (set to `open-brain-db` in Docker) |
 | `POSTGRES_PORT` | No | `5432` | DB port |
-| `MCP_PORT` | No | `8000` | Host port mapped to MCP server container port 8000 |
+| `MCP_PORT` | No | `8001` | Host port mapped to MCP server container port 8000. On Coolify, avoid `8000` because Coolify itself uses it. |
 | `OPENBRAIN_LLM_PROVIDER` | No | `openai` | Structured-generation provider: `openai`, `openrouter`, or `ollama` |
 | `OPENBRAIN_LLM_MODEL` | No | provider-specific | Model used for fact and graph extraction |
 | `OPENBRAIN_LLM_BASE_URL` | No | provider-specific | Base URL for the configured LLM provider |
@@ -169,7 +169,7 @@ All configuration is via environment variables (`.env` file):
 
 ## MCP transport
 
-The MCP server uses **streamable-http** by default (e.g. in Docker it listens on port 8000 at `/mcp`). To use **stdio** for local IDE integration (Cursor, Claude Desktop, etc.), set `MCP_TRANSPORT=stdio` and run the server so the IDE can spawn it and talk over stdin/stdout. See [IDE Integration](#ide-integration) below for config examples.
+The MCP server uses **streamable-http** by default (e.g. in Docker it listens on container port 8000 at `/mcp`, mapped to host port `8001` by default). To use **stdio** for local IDE integration (Cursor, Claude Desktop, etc.), set `MCP_TRANSPORT=stdio` and run the server so the IDE can spawn it and talk over stdin/stdout. See [IDE Integration](#ide-integration) below for config examples.
 
 ---
 
@@ -183,7 +183,7 @@ When running via Docker, the MCP server exposes a Streamable HTTP endpoint. Any 
 {
   "mcpServers": {
     "open-brain": {
-      "serverUrl": "http://localhost:8000/mcp"
+      "serverUrl": "http://localhost:8001/mcp"
     }
   }
 }

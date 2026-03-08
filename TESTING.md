@@ -74,7 +74,7 @@ docker compose logs -f open-brain-mcp
 ### Testing with MCP Inspector
 Since the server is now running in **Streamable HTTP mode**, you can test it using the [MCP Inspector](https://github.com/modelcontextprotocol/inspector):
 ```bash
-npx @modelcontextprotocol/inspector http://localhost:8000/mcp
+npx @modelcontextprotocol/inspector http://localhost:8001/mcp
 ```
 
 ### Manual E2E Smoke Test (Direct Tool Call)

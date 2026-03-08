@@ -13,7 +13,6 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - brain_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     command: postgres -c shared_preload_libraries='age,pg_cron' -c cron.database_name='${POSTGRES_DB}' -c openbrain.memory_retention_months='${MEMORY_RETENTION_MONTHS:-12}'
     restart: unless-stopped
     networks:
@@ -40,10 +39,8 @@ services:
       open-brain-db:
         condition: service_healthy
     ports:
-      - "${MCP_PORT:-8000}:8000"
+      - "${MCP_PORT:-8001}:8000"
     restart: always
-    volumes:
-      - .:/app
     networks:
       - brain_net
 
