@@ -34,6 +34,11 @@ class OpenBrainRepositories:
     def ensure_infrastructure(self) -> None:
         dims = self.settings.embedding.dims
         with self.db.cursor(commit=True) as (_, cur):
+            # Coolify/compose can start app containers before docker-entrypoint init
+            # scripts have finished creating extensions. Ensure the runtime-critical
+            # extensions exist before creating any vector or AGE-backed objects.
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public;")
+            cur.execute("CREATE EXTENSION IF NOT EXISTS age;")
             cur.execute("CREATE SCHEMA IF NOT EXISTS memory_store;")
             cur.execute(
                 """
