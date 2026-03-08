@@ -6,6 +6,8 @@ This repository is intentionally **single-user**. The public API is one local br
 
 Give your AI agent a persistent memory that remembers *what* happened (vector search) and *why* it matters (knowledge graph) — all from a single Postgres instance, exposed as MCP tools.
 
+The runtime is now **provider-agnostic**. OpenBrain owns its ingestion, embeddings, vector search, and graph extraction pipeline, and supports **OpenAI**, **OpenRouter**, and **Ollama** as first-class providers.
+
 For **multi-source ingestion** (ChatGPT/Claude/Antigravity exports, PC/phone notes, etc.), see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
@@ -26,15 +28,15 @@ For **multi-source ingestion** (ChatGPT/Claude/Antigravity exports, PC/phone not
            │                               │
            └───────────┬───────────────────┘
                        │ brain_core.py
-              ┌────────▼────────┐
-              │  Mem0  │  AGE   │
-              │(embed) │(graph) │
-              └────┬───┴───┬───┘
-                   │       │
-              ┌────▼───────▼────┐
+              ┌────────▼──────────────┐
+              │  openbrain package    │
+              │ providers │ repos │   │
+              └────┬──────┴───────┬───┘
+                   │              │
+              ┌────▼──────────────▼────┐
               │  PostgreSQL 16  │
               │                 │
-              │ pgvector → Emb. │
+              │ pgvector → Chunks│
               │ AGE → Knowledge │
               │ partman → Parts │
               │ pg_cron → Auto  │
@@ -43,11 +45,11 @@ For **multi-source ingestion** (ChatGPT/Claude/Antigravity exports, PC/phone not
 
 | Component | Role |
 |-----------|------|
-| **pgvector** | 1536-dim HNSW vector search for semantic memory recall |
+| **pgvector** | Runtime-owned HNSW vector search over `memory_store.memory_chunks` |
 | **Apache AGE** | Cypher-based knowledge graph for entity relationships |
 | **pg_partman** | Optional monthly partitioning for the example admin table `memory_store.memories` |
 | **pg_cron** | Maintenance for that optional partitioned admin table |
-| **Mem0** | Embedding generation + entity extraction via OpenAI |
+| **OpenBrain runtime** | Chunking, embedding, fact extraction, ranking, and queue orchestration |
 | **MCP** | Tool protocol for agent integration via Streamable HTTP or stdio |
 
 Schema: main tables (`raw_captures`, `capture_jobs`) and key indexes are summarized in [ARCHITECTURE.md §6](ARCHITECTURE.md#6-schema-summary).
@@ -59,13 +61,16 @@ Schema: main tables (`raw_captures`, `capture_jobs`) and key indexes are summari
 ### Prerequisites
 
 - Docker & Docker Compose
-- An OpenAI API key (for embeddings + entity extraction)
+- One provider setup for embeddings + extraction:
+  - OpenAI
+  - OpenRouter
+  - Ollama
 
 ### 1. Configure
 
 ```bash
 cp .env.example .env
-# Edit .env — set your OPENAI_API_KEY and a strong POSTGRES_PASSWORD
+# Edit .env — set provider env vars and a strong POSTGRES_PASSWORD
 ```
 
 ### 2. Start
@@ -139,8 +144,18 @@ All configuration is via environment variables (`.env` file):
 | `POSTGRES_HOST` | No | `localhost` | DB host (set to `open-brain-db` in Docker) |
 | `POSTGRES_PORT` | No | `5432` | DB port |
 | `MCP_PORT` | No | `8000` | Host port mapped to MCP server container port 8000 |
-| `OPENAI_API_KEY` | **Yes** | — | OpenAI API key for Mem0 |
-| `OPENBRAIN_EMBEDDING_MODEL` | No | — | If set, stored in Mem0 memory metadata for re-embedding or A/B model tracking (e.g. `text-embedding-3-small`) |
+| `OPENBRAIN_LLM_PROVIDER` | No | `openai` | Structured-generation provider: `openai`, `openrouter`, or `ollama` |
+| `OPENBRAIN_LLM_MODEL` | No | provider-specific | Model used for fact and graph extraction |
+| `OPENBRAIN_LLM_BASE_URL` | No | provider-specific | Base URL for the configured LLM provider |
+| `OPENBRAIN_LLM_API_KEY` | Sometimes | — | Required for `openai` and `openrouter`; not needed for local Ollama |
+| `OPENBRAIN_EMBEDDING_PROVIDER` | No | same as LLM provider | Embedding provider: `openai`, `openrouter`, or `ollama` |
+| `OPENBRAIN_EMBEDDING_MODEL` | No | provider-specific | Embedding model name |
+| `OPENBRAIN_EMBEDDING_BASE_URL` | No | provider-specific | Base URL for embedding requests |
+| `OPENBRAIN_EMBEDDING_API_KEY` | Sometimes | — | Required for `openai` and `openrouter`; not needed for local Ollama |
+| `OPENBRAIN_EMBEDDING_DIMS` | **Yes** for `openrouter`/`ollama` | `1536` for `openai` | Embedding dimensionality used to create `memory_store.memory_chunks` |
+| `OPENBRAIN_GRAPH_NAME` | No | `brain_graph_v2` | Apache AGE graph name used by the new runtime |
+| `OPENBRAIN_OPENROUTER_SITE_URL` | No | — | Optional `HTTP-Referer` header for OpenRouter |
+| `OPENBRAIN_OPENROUTER_APP_NAME` | No | — | Optional `X-Title` header for OpenRouter |
 | `MCP_TRANSPORT` | No | `streamable-http` | MCP transport: `streamable-http` (default) or `stdio` for local IDE |
 | `MEMORY_RETENTION_MONTHS` | No | `12` | Retention window for the optional `memory_store.memories` admin table; `0` disables retention |
 | `OPENBRAIN_CAPTURE_MODE` | No | `async` | `async` queues `/remember` for background indexing, `sync` blocks until ingestion finishes |
@@ -251,8 +266,8 @@ python -m pytest tests/ -v
 
 ```
 openBrain/
-├── brain_core.py          # Shared memory layer (Mem0 + AGE init, capture/search)
-├── age_provider.py       # Apache AGE graph provider (Mem0 BaseGraphProvider)
+├── brain_core.py         # Stable public wrappers around the OpenBrain application
+├── openbrain/           # Domain, application, and infrastructure packages
 ├── open_brain_mcp.py     # MCP server wrapping brain_core tools
 ├── telegram_bot.py       # Telegram bot client (/remember, /search)
 ├── init.sql              # Database schema, partitioning, indexes, cron

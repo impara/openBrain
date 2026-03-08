@@ -25,7 +25,7 @@ docker compose exec open-brain-db psql -U brain_user -d open_brain -c "SELECT ex
 ---
 
 ## 2. Unit Testing
-Run the full test suite covering the Apache AGE provider, Cypher injection protection, async queue behavior, auto-classification, and regression fixes.
+Run the full test suite covering provider settings, provider adapters, runtime repositories, Apache AGE graph behavior, async queue behavior, auto-classification, and regression fixes.
 
 ### Run Local Tests
 Requires dependencies installed (`pip install -r requirements.txt`):
@@ -49,15 +49,15 @@ docker compose exec open-brain-db psql -U brain_user -d open_brain -c "\d+ memor
 ```
 
 ### Check HNSW Index Choice
-Verify that the optional admin table index is created with correct parameters ($m=16, ef\_construction=128$):
+Verify that the runtime chunk index exists:
 ```bash
-docker compose exec open-brain-db psql -U brain_user -d open_brain -c "SELECT indexdef FROM pg_indexes WHERE indexname LIKE '%embedding%';"
+docker compose exec open-brain-db psql -U brain_user -d open_brain -c "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'memory_store' AND indexname LIKE '%memory_chunks%';"
 ```
 
 ### Inspect Knowledge Graph (Apache AGE)
 Check if any nodes have been created in the graph:
 ```bash
-docker compose exec open-brain-db psql -U brain_user -d open_brain -c "SELECT * FROM cypher('brain_graph', \$\$ MATCH (n) RETURN n \$\$) AS (n agtype);"
+docker compose exec open-brain-db psql -U brain_user -d open_brain -c "SELECT * FROM cypher('brain_graph_v2', \$\$ MATCH (n) RETURN n \$\$) AS (n agtype);"
 ```
 
 ---
@@ -142,4 +142,4 @@ UNION ALL SELECT 'memory_store.raw_captures', COUNT(*) FROM memory_store.raw_cap
 ```
 
 > [!IMPORTANT]
-> **LLM Quota Requirement**: The `capture_thought` tool uses the LLM to extract facts from text. If your OpenAI Key only has embedding access (or is out of quota), the `m.add()` call will fail. Ensure your key has access to `gpt-4o-mini` (default) or update the config in `brain_core.py`.
+> **Provider Capability Requirement**: The `capture_thought` tool needs both an embedding provider and a structured-generation provider. Ensure your configured provider/model pair supports the chosen role and that `OPENBRAIN_EMBEDDING_DIMS` matches the actual embedding output size.

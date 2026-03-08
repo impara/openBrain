@@ -4,14 +4,13 @@
 -- This script runs once on first container boot via docker-entrypoint-initdb.d.
 -- It sets up extensions, schemas, partitioned tables, indexes, and scheduling.
 --
--- NOTE ON MEM0 INTEGRATION:
---   Mem0's pgvector provider creates its own internal tables (typically in the
---   public schema) using the configured `collection_name` as a logical grouping.
---   The `memory_store.memories` partitioned table below serves as a *parallel*
---   storage layer for direct queries, analytics, and admin access independent
---   of Mem0's abstractions. OpenBrain's runtime capture/search flow does not
---   write to this table today; the retention settings below apply only to this
---   optional partitioned store.
+-- NOTE ON RUNTIME STORAGE:
+--   OpenBrain's runtime vector table (`memory_store.memory_chunks`) is created
+--   by the application bootstrap because the embedding dimension is
+--   configuration-driven. The `memory_store.memories` partitioned table below
+--   remains an optional parallel storage layer for direct queries, analytics,
+--   and admin access. The retention settings below apply only to that optional
+--   partitioned store.
 -- ============================================================================
 
 -- 1. Enable Required Extensions
@@ -84,7 +83,7 @@ CREATE TABLE memory_store.memories_template (LIKE memory_store.memories);
 
 -- 5. Apply Indexes to the Template
 --
--- HNSW Parameter Rationale (for OpenAI text-embedding-ada-002, 1536 dimensions):
+-- HNSW Parameter Rationale (example values for a 1536-dim embedding):
 --   m = 16         → Each graph node connects to 16 neighbors.
 --                    Good balance of recall vs. memory for 1536-dim vectors.
 --                    Lower (8) saves memory but hurts recall; higher (32) diminishing returns.

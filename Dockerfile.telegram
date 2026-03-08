@@ -8,7 +8,8 @@ RUN pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir "python-telegram-bot>=21.0"
 
 # Copy application code
-COPY age_provider.py brain_core.py telegram_bot.py ./
+COPY openbrain ./openbrain
+COPY brain_core.py telegram_bot.py ./
 
 # Run as non-root
 RUN useradd -r -s /bin/false -m appuser

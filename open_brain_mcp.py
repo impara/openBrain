@@ -42,9 +42,9 @@ def mcp_ingest(
 ) -> str:
     """
     Flexible ingest for any channel: chat exports (ChatGPT, Claude, Antigravity),
-    PC/phone notes, or other sources. Content is queued into the same memory pipeline;
-    search_brain searches across all sources. Use external_id to avoid re-ingesting
-    the same conversation or note (dedup).
+    PC/phone notes, or other sources. Content is queued into the same runtime-owned
+    memory pipeline; search_brain searches across all sources. Use external_id to
+    avoid re-ingesting the same conversation or note (dedup).
 
     Args:
         content: Text to remember (one message, note, or merged chunk).

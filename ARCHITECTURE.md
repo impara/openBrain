@@ -2,15 +2,16 @@
 
 This doc describes how to keep one unified “brain” while ingesting from many channels: chat exports (ChatGPT, Claude, Antigravity), PC notes, phone notes, MCP, Telegram, etc.
 
-This repository runs as **one local brain**. Public entrypoints are single-user by design; the only `user_id` values left are internal fixed columns required by Mem0/Postgres.
+This repository runs as **one local brain**. Public entrypoints are single-user by design; the only `user_id` values left are internal fixed columns required by Postgres storage.
 
 ---
 
 ## 1. Design principles
 
-- **One memory store**: All sources write into the same Mem0 + AGE + `raw_captures` pipeline. Search is global across sources; you can still filter or label by source when needed.
-- **Source as first-class field**: Every ingested item has a `source` (e.g. `chatgpt`, `notes_phone`). It is stored in `raw_captures.source`, passed into Mem0 as metadata `origin`, and **shown in search results** (e.g. `• [raw • chatgpt] …` or `• [vector • notes_phone] …`) so you can see where each memory came from.
+- **One memory store**: All sources write into the same OpenBrain-owned vector + graph + `raw_captures` pipeline. Search is global across sources; you can still filter or label by source when needed.
+- **Source as first-class field**: Every ingested item has a `source` (e.g. `chatgpt`, `notes_phone`). It is stored in `raw_captures.source`, copied into `memory_chunks.source` and chunk metadata `origin`, and **shown in search results** so you can see where each memory came from.
 - **Single ingest pipeline**: One code path writes to `raw_captures` and enqueues a job; workers run the same ingestion logic with an automatic default that can still be explicitly forced to enriched or raw-only modes.
+- **Provider-agnostic runtime**: Extraction and embeddings are selected deployment-wide through adapters for OpenAI, OpenRouter, or Ollama.
 - **Connectors stay outside core**: Format-specific logic (e.g. “parse ChatGPT export JSON”) lives in small adapters or scripts that call the core ingest API. Core stays format-agnostic.
 
 ---
@@ -34,14 +35,14 @@ This repository runs as **one local brain**. Public entrypoints are single-user 
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  EXISTING WORKERS                                                         │
-│  Poll capture_jobs → _ingest_capture(thought, raw_capture_id, source)    │
-│  → Mem0 + optional enrichment/fallback as selected                       │
+│  Poll capture_jobs → chunk → embed → store → extract facts/graph         │
+│  → OpenBrain-owned runtime pipeline                                      │
 └───────────────────────────────┬─────────────────────────────────────────┘
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  UNIFIED MEMORY                                                           │
-│  Mem0 vectors + AGE graph + raw_captures                                 │
+│  memory_chunks + AGE graph + raw_captures                                │
 │  search_brain(query) searches everything                                 │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -80,7 +81,7 @@ You don’t have to choose “will this be stored?” — **everything you send 
 |-------------|----------------|
 | **Any** | Your content is **always** stored as one raw memory (exact recall). So commands, notes, and prose are all retrievable. |
 | **auto** | Default. Heuristics decide whether the input looks like a command/code/reference block (`snippet`) or normal prose/notes (`personal`). |
-| **personal** | Raw + **enrichment**: we also run LLM fact extraction (and fallback bullets if Mem0 returns nothing). You get the verbatim memory plus extra semantic/graph memories for better search. |
+| **personal** | Raw + **enrichment**: we also run LLM fact extraction and graph extraction. You get the verbatim memory plus extra semantic/graph memories for better search. |
 | **snippet** | Raw only. No extra extraction. Use when you want **just** exact recall and no duplicate “fact” memories. |
 
 So: **one rule** — we always keep what you sent. The public API always enters through the automatic classifier; `personal` and `snippet` are internal pipeline outcomes, not normal user-facing choices.
@@ -91,7 +92,7 @@ So: **one rule** — we always keep what you sent. The public API always enters 
 
 Search is **hybrid** and **single-user**:
 
-- **Hybrid**: Results come from three paths — **vector** (Mem0/pgvector), **keyword** (raw_captures `LIKE` on content), and **graph** (Apache AGE relations). Scores combine vector similarity, token overlap, source weight, and recency; candidates are deduplicated and ranked.
+- **Hybrid**: Results come from three paths — **vector** (`memory_store.memory_chunks` via pgvector), **keyword** (raw_captures `LIKE` on content), and **graph** (Apache AGE relations). Scores combine vector similarity, token overlap, source weight, and recency; candidates are deduplicated and ranked.
 - **Single-brain scope**: All paths run against one local brain.
 - **Score threshold**: Candidates below a fixed relevance threshold (configurable in code) are dropped so only confident evidence is returned.
 - **Manual inspection**: Use `search_brain(query, debug=True)` (or the MCP `search_brain_debug` tool) to see candidates, scores, dropped reasons, and the final ranking. This supports tuning and "don't chunk without testing retrieval."
@@ -102,24 +103,25 @@ Search is **hybrid** and **single-user**:
 
 Chunking is **semantic-ish** and differs by path:
 
-- **Mem0 (primary)**: Mem0 performs its own extraction and chunking for vector and graph; we do not control a fixed token size there.
-- **Fallback**: When Mem0 returns no extracted memories for personal ingest, we use **sentence splitting** (by `.!?`) with a max character size per chunk, then **bullet extraction** (LLM or heuristic) to produce factual bullets. So fallback is sentence-boundary + bullet-based, not fixed-token-only.
+- **Primary**: OpenBrain chunks by sentence boundaries with a max chunk size, stores raw chunks as vectors, and stores extracted fact bullets as additional vector memories.
+- **Fallback**: If structured extraction fails, the system falls back to heuristic bullets rather than dropping enrichment entirely.
 - **Retrieval**: When changing chunk sizes or strategies, **test retrieval** (e.g. golden queries or `search_brain_debug`) so you can verify that expected memories appear in results.
 
 ---
 
 ## 6. Schema (summary)
 
-Main application tables (see `init.sql` and `brain_core._ensure_storage_infrastructure()`):
+Main application tables:
 
 | Table | Purpose |
 |-------|--------|
 | `memory_store.raw_captures` | Verbatim ingested content; columns include the internal fixed brain id (`user_id='default'`), `source`, `content`, `content_len`, `ingest_strategy`, `external_id`, `created_at`. |
 | `memory_store.capture_jobs` | Queue for async ingestion; links to `raw_captures`, has `status`, `attempt_count`, `available_at`, `last_error`. |
+| `memory_store.memory_chunks` | Runtime vector storage for raw chunks and extracted facts; owned by OpenBrain and created at bootstrap using the configured embedding dimensions. |
 
-Key indexes: `idx_raw_captures_user_created`, `idx_raw_captures_user_source_external_id` (partial, for dedup), `idx_capture_jobs_status_available_created`. Runtime vector storage and indexing are managed by Mem0/pgvector; `memory_store.memories` is an optional parallel/admin table.
+Key indexes: `idx_raw_captures_user_created`, `idx_raw_captures_user_source_external_id` (partial, for dedup), `idx_capture_jobs_status_available_created`, and the HNSW index on `memory_store.memory_chunks.embedding`. `memory_store.memories` remains an optional parallel/admin table.
 
-**At scale (vector index):** For large volumes, latency and recall depend primarily on the Mem0/pgvector path that backs `m.add()` and `m.search()`. The `memory_store.memories_template` HNSW index in `init.sql` applies only to the optional parallel/admin table, not the main runtime memory path.
+**At scale (vector index):** For large volumes, latency and recall depend primarily on the `memory_store.memory_chunks` pgvector path owned by the runtime. The `memory_store.memories_template` HNSW index in `init.sql` applies only to the optional parallel/admin table, not the main runtime memory path.
 
 ---
 
