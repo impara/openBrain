@@ -313,3 +313,26 @@ def test_search_brain_debug_includes_threshold_and_ranking():
     assert "=== Search Debug ===" in result
     assert "threshold:" in result
     assert "final_ranking:" in result
+
+
+def test_search_brain_answers_quote_style_queries_with_matching_passage():
+    app, repositories, vector_repo, _ = make_app()
+    text = (
+        "We have made you into nations and tribes so that you may know one another. "
+        "Everything is perishing except His Face. (28:88) Diversity is not to be worshipped."
+    )
+    vector_repo.search_results = [
+        {
+            "id": 1,
+            "content": text,
+            "metadata": {"origin": "capture_thought", "ingest_mode": "raw"},
+            "created_at": datetime.now(timezone.utc),
+            "source": "capture_thought",
+            "score": 0.01,
+        }
+    ]
+    repositories.raw_matches = []
+
+    result = app.search_brain("What does 28:88 say", debug=False)
+    assert "28:88 says" in result
+    assert "Everything is perishing except His Face" in result

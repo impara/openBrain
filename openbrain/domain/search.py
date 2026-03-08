@@ -15,6 +15,8 @@ SOURCE_WEIGHT = {"vector": 1.0, "graph": 0.82, "raw": 0.68}
 MAX_DEBUG_CHARS = 3800
 MAX_SOURCE_TEXT = 180
 MAX_ANSWER_TEXT = 520
+_CITATION_RE = re.compile(r"\b\d{1,3}:\d{1,3}\b")
+_QUOTE_QUERY_RE = re.compile(r"\b(what does|what is|what says|say|quote|verse|ayah|surah|meaning)\b", re.IGNORECASE)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -105,6 +107,78 @@ def _extract_relevant_snippet(content: str, query_tokens: list[str], max_len: in
     return f"{clean[:max_len].rstrip()}..."
 
 
+def _query_citations(query: str) -> list[str]:
+    return [match.group(0).lower() for match in _CITATION_RE.finditer(query or "")]
+
+
+def _split_segments(text: str) -> list[str]:
+    raw = (text or "").strip()
+    if not raw:
+        return []
+
+    segments: list[str] = []
+    blocks = [block.strip() for block in re.split(r"\n{2,}", raw) if block.strip()]
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if len(lines) > 1:
+            segments.extend(lines)
+            continue
+        segments.extend(
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", block)
+            if sentence.strip()
+        )
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for segment in segments:
+        clean = " ".join(segment.split())
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(clean)
+    return deduped or [" ".join(raw.split())]
+
+
+def _trim_cleanly(text: str, max_len: int) -> str:
+    clean = " ".join((text or "").split())
+    if len(clean) <= max_len:
+        return clean
+    trimmed = clean[:max_len].rsplit(" ", 1)[0].rstrip()
+    return f"{trimmed or clean[:max_len].rstrip()}..."
+
+
+def _best_matching_segment(
+    text: str,
+    *,
+    query_tokens: list[str],
+    max_len: int = 260,
+    query_citations: list[str] | None = None,
+) -> str:
+    clean = " ".join((text or "").split())
+    if len(clean) <= max_len:
+        return clean
+
+    citations = [citation.lower() for citation in (query_citations or [])]
+    best_segment = ""
+    best_score = -1.0
+    for segment in _split_segments(text):
+        segment_lower = segment.lower()
+        overlap = _query_overlap(query_tokens, segment)
+        citation_bonus = 0.5 if citations and any(citation in segment_lower for citation in citations) else 0.0
+        score = overlap + citation_bonus
+        if score > best_score:
+            best_score = score
+            best_segment = segment
+
+    if best_segment and best_score > 0:
+        return _trim_cleanly(best_segment, max_len)
+    return _extract_relevant_snippet(text, query_tokens=query_tokens, max_len=max_len)
+
+
 def _format_relation(relation: Any) -> str:
     if isinstance(relation, str):
         return relation
@@ -158,11 +232,18 @@ def build_candidates(
     raw_matches: list[RawCaptureMatch],
 ) -> list[EvidenceItem]:
     query_tokens = tokenize(query)
+    query_citations = _query_citations(query)
     candidates: list[EvidenceItem] = []
 
     for row in vector_results:
         if isinstance(row, dict):
             text = row.get("memory") or row.get("text") or row.get("content") or str(row)
+            best_text = _best_matching_segment(
+                str(text).strip(),
+                query_tokens=query_tokens,
+                max_len=260,
+                query_citations=query_citations,
+            )
             created_at = row.get("created_at")
             score_raw = _safe_float(row.get("score"), default=1.0)
             row_meta = row.get("metadata") or {}
@@ -181,7 +262,7 @@ def build_candidates(
             candidates.append(
                 EvidenceItem(
                     source="vector",
-                    text=str(text).strip(),
+                    text=best_text if isinstance(row, dict) else str(text).strip(),
                     score_raw=score_raw,
                     metadata=metadata,
                 )
@@ -191,7 +272,12 @@ def build_candidates(
         candidates.append(EvidenceItem(source="graph", text=relation_text.strip(), score_raw=None, metadata={}))
 
     for raw in raw_matches:
-        snippet = _extract_relevant_snippet(raw.content, query_tokens=query_tokens)
+        snippet = _best_matching_segment(
+            raw.content,
+            query_tokens=query_tokens,
+            max_len=260,
+            query_citations=query_citations,
+        )
         if snippet:
             candidates.append(
                 EvidenceItem(
@@ -242,6 +328,7 @@ def rank_evidence(
     dropped: list[dict[str, Any]] = []
     debug_candidates: list[dict[str, Any]] = []
     seen_norm: set[str] = set()
+    seen_token_sets: list[set[str]] = []
 
     for item in candidates:
         text = item.text.strip()
@@ -273,7 +360,18 @@ def rank_evidence(
             )
             continue
 
-        if norm in seen_norm:
+        norm_tokens = set(norm.split()) if norm else set()
+        duplicate = norm in seen_norm
+        if not duplicate and norm_tokens:
+            for existing_tokens in seen_token_sets:
+                if not existing_tokens:
+                    continue
+                overlap_ratio = len(norm_tokens & existing_tokens) / max(len(norm_tokens), len(existing_tokens))
+                if overlap_ratio >= 0.8:
+                    duplicate = True
+                    break
+
+        if duplicate:
             dropped.append(
                 {
                     "source": item.source,
@@ -297,6 +395,7 @@ def rank_evidence(
             continue
 
         seen_norm.add(norm)
+        seen_token_sets.append(norm_tokens)
         selected.append(item)
 
     selected.sort(key=lambda item: item.score_norm, reverse=True)
@@ -338,12 +437,46 @@ def _truncate_text(text: str, max_len: int = MAX_SOURCE_TEXT) -> str:
 
 
 def synthesize_answer(query: str, evidence: list[EvidenceItem]) -> str:
-    del query
     if not evidence:
         return (
             "I am not confident enough to answer from current memory. "
             "Try a more specific query or remember more concrete facts."
         )
+
+    query_tokens = tokenize(query)
+    query_citations = _query_citations(query)
+    quote_like_query = bool(query_citations) or bool(_QUOTE_QUERY_RE.search(query or ""))
+
+    if quote_like_query:
+        best_quote = ""
+        best_score = -1.0
+        for item in evidence:
+            candidate = _best_matching_segment(
+                item.text,
+                query_tokens=query_tokens,
+                max_len=220,
+                query_citations=query_citations,
+            )
+            if not candidate:
+                continue
+            score = _query_overlap(query_tokens, candidate)
+            if query_citations and any(citation in candidate.lower() for citation in query_citations):
+                score += 0.5
+            if score > best_score:
+                best_score = score
+                best_quote = candidate
+
+        if best_quote:
+            if query_citations and any(citation in best_quote.lower() for citation in query_citations):
+                citation = query_citations[0]
+                return _truncate_text(
+                    f'Based on your stored memories, {citation} says: {best_quote}',
+                    max_len=MAX_ANSWER_TEXT,
+                )
+            return _truncate_text(
+                f"Based on your stored memories: {best_quote}",
+                max_len=MAX_ANSWER_TEXT,
+            )
 
     statements: list[str] = []
     source_counts = {"vector": 0, "graph": 0, "raw": 0}

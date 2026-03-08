@@ -35,7 +35,7 @@ _STOPWORDS = {
     "on",
 }
 
-_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9@._-]{1,}")
+_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9@._:-]{1,}")
 _CLI_FLAG_RE = re.compile(r"(?:^|\s)--?[A-Za-z0-9][\w-]*")
 _ENV_ASSIGN_RE = re.compile(r"^[A-Z_][A-Z0-9_]*=", re.MULTILINE)
 _CODE_FENCE_RE = re.compile(r"```|~~~")
