@@ -32,48 +32,41 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 AUTO_CAPTURE = os.environ.get("TELEGRAM_AUTO_CAPTURE", "false").lower() == "true"
 
 
-def _user_id(update: Update) -> str:
-    """Map Telegram user to OpenBrain user_id.
-    
-    Currently single-user mode — shares the same brain as the IDE.
-    For multi-user isolation, change to: return f"telegram_{update.effective_user.id}"
-    """
-    return "default"
-
-
 # ── Command Handlers ──────────────────────────
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start — welcome message."""
+    del context
     await update.message.reply_text(
         "🧠 *OpenBrain — Your AI Memory*\n\n"
         "I store and recall your thoughts using semantic search "
         "and a knowledge graph.\n\n"
         "*Commands:*\n"
-        "• `/remember <text>` — Save a thought\n"
+        "• `/remember <text>` — Save anything; OpenBrain auto-detects enrichment\n"
         "• `/search <query>` — Search your memories\n"
         "• `/search_debug <query>` — Search with debug trace\n"
         "• `/help` — Show this message\n\n"
-        "Everything is tied to your Telegram account, "
-        "so your memories are private to you.",
+        "This repository is configured as a single-user brain.",
         parse_mode="Markdown",
     )
 
 
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help — usage instructions."""
+    del context
     await update.message.reply_text(
         "🧠 *OpenBrain Commands*\n\n"
-        "• `/remember <text>` — Save a thought or decision\n"
+        "• `/remember <text>` — Save anything; OpenBrain auto-detects whether to enrich it\n"
         "• `/search <query>` — Recall related memories\n"
         "• `/search_debug <query>` — Recall with scoring/debug trace\n"
-        "• `/help` — Show this message",
+        "• `/help` — Show this message\n\n"
+        "Single-user mode: all messages go into the same local brain.",
         parse_mode="Markdown",
     )
 
 
 async def remember_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /remember <text> — capture a thought."""
+    """Handle /remember <text> — capture text with automatic enrichment selection."""
     text = " ".join(context.args) if context.args else ""
     if not text:
         await update.message.reply_text(
@@ -83,11 +76,10 @@ async def remember_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    uid = _user_id(update)
-    logger.info("Telegram /remember from %s (len=%d)", uid, len(text))
+    logger.info("Telegram /remember (len=%d)", len(text))
 
     try:
-        result = await asyncio.to_thread(capture_thought, text, user_id=uid)
+        result = await asyncio.to_thread(capture_thought, text)
         await update.message.reply_text(f"✅ {result}")
     except Exception as e:
         logger.exception("Failed to capture thought")
@@ -105,11 +97,10 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    uid = _user_id(update)
-    logger.info("Telegram /search from %s query=%r", uid, query[:80])
+    logger.info("Telegram /search query=%r", query[:80])
 
     try:
-        result = search_brain(query, user_id=uid, debug=False)
+        result = await asyncio.to_thread(search_brain, query, debug=False)
         await update.message.reply_text(result)
     except Exception as e:
         logger.exception("Failed to search brain")
@@ -127,11 +118,10 @@ async def search_debug_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    uid = _user_id(update)
-    logger.info("Telegram /search_debug from %s query=%r", uid, query[:80])
+    logger.info("Telegram /search_debug query=%r", query[:80])
 
     try:
-        result = search_brain(query, user_id=uid, debug=True)
+        result = await asyncio.to_thread(search_brain, query, debug=True)
         await update.message.reply_text(result)
     except Exception as e:
         logger.exception("Failed to debug-search brain")
@@ -147,11 +137,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not text or text.startswith("/"):
         return
 
-    uid = _user_id(update)
-    logger.info("Telegram auto-capture from %s (len=%d)", uid, len(text))
+    logger.info("Telegram auto-capture (len=%d)", len(text))
 
     try:
-        await asyncio.to_thread(capture_thought, text, user_id=uid)
+        await asyncio.to_thread(capture_thought, text)
         await update.message.reply_text("💭 Thought captured.")
     except Exception as e:
         logger.exception("Failed to auto-capture thought")

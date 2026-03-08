@@ -1,5 +1,5 @@
 """
-brain_core.py — Shared memory layer for OpenBrain.
+brain_core.py — Shared single-user memory layer for OpenBrain.
 
 Initializes the Mem0 + Apache AGE dual-stack and exposes
 capture_thought() / search_brain() for any client (MCP, Telegram, etc.).
@@ -27,6 +27,7 @@ from age_provider import ApacheAGEProvider
 load_dotenv()
 
 logger = logging.getLogger("open_brain")
+_SINGLE_USER_ID = "default"
 
 # ── Database Config ───────────────────────────
 DB_CONFIG = {
@@ -49,13 +50,16 @@ def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
 
 
 _LLM_MODEL = os.environ.get("OPENBRAIN_SUMMARY_MODEL", "gpt-4o-mini")
+_EMBEDDING_MODEL = (os.environ.get("OPENBRAIN_EMBEDDING_MODEL") or "").strip()
 _CAPTURE_MODE = os.environ.get("OPENBRAIN_CAPTURE_MODE", "async").strip().lower()
 if _CAPTURE_MODE not in {"async", "sync"}:
     _CAPTURE_MODE = "async"
 _INGEST_WORKERS = _env_int("OPENBRAIN_INGEST_WORKERS", 1)
 _INGEST_POLL_MS = _env_int("OPENBRAIN_INGEST_POLL_MS", 250, minimum=50)
+_MEMORY_RETENTION_MONTHS = _env_int("MEMORY_RETENTION_MONTHS", 12, minimum=0)
 _CAPTURE_RETRY_BACKOFF_SECONDS = (60, 300, 900)
 _CAPTURE_ACK_TEXT = "Thought captured and queued for indexing."
+_PERSIST_ERROR_HINT = " Check OPENAI_API_KEY and database connectivity."
 _MAX_EVIDENCE = 5
 _SCORE_THRESHOLD = 0.52
 _SOURCE_WEIGHT = {"vector": 1.0, "graph": 0.82, "raw": 0.68}
@@ -63,6 +67,55 @@ _MAX_DEBUG_CHARS = 3800
 _MAX_SOURCE_TEXT = 180
 _MAX_ANSWER_TEXT = 520
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9@._-]{1,}")
+_CLI_FLAG_RE = re.compile(r"(?:^|\s)--?[A-Za-z0-9][\w-]*")
+_ENV_ASSIGN_RE = re.compile(r"^[A-Z_][A-Z0-9_]*=", re.MULTILINE)
+_CODE_FENCE_RE = re.compile(r"```|~~~")
+_IMPORT_LINE_RE = re.compile(r"^\s*(?:from\s+\S+\s+import\s+\S+|import\s+\S+)\s*$", re.MULTILINE)
+_DEF_LINE_RE = re.compile(r"^\s*(?:def|class)\s+[A-Za-z_][A-Za-z0-9_]*", re.MULTILINE)
+_SQL_LINE_RE = re.compile(r"^\s*(?:SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|WITH)\b", re.MULTILINE)
+_SHELL_COMMAND_PREFIXES = {
+    "apt",
+    "aws",
+    "bash",
+    "brew",
+    "cargo",
+    "chmod",
+    "chown",
+    "composer",
+    "cp",
+    "curl",
+    "docker",
+    "find",
+    "git",
+    "go",
+    "grep",
+    "helm",
+    "jq",
+    "kubectl",
+    "ls",
+    "make",
+    "mkdir",
+    "mv",
+    "nix",
+    "npm",
+    "npx",
+    "pip",
+    "pnpm",
+    "poetry",
+    "psql",
+    "python",
+    "python3",
+    "rm",
+    "rsync",
+    "scp",
+    "sed",
+    "ssh",
+    "systemctl",
+    "terraform",
+    "uv",
+    "wget",
+    "yarn",
+}
 _STOPWORDS = {
     "the",
     "and",
@@ -96,6 +149,63 @@ _STOPWORDS = {
 }
 
 
+def _brain_user_id() -> str:
+    """Return the fixed brain id used by all runtime storage and search paths."""
+    return _SINGLE_USER_ID
+
+
+def _looks_like_natural_language(text: str) -> bool:
+    words = re.findall(r"[A-Za-z]{2,}", text)
+    if len(words) < 8:
+        return False
+    stopword_hits = sum(1 for word in words if word.lower() in _STOPWORDS)
+    sentence_like = len(re.findall(r"[.!?]", text))
+    return stopword_hits >= 4 and sentence_like >= 1
+
+
+def _detect_auto_ingest_strategy(text: str, source: str = "import") -> str:
+    """Choose whether a capture should be enriched or stored raw only."""
+    clean = (text or "").strip()
+    if not clean:
+        return "personal"
+
+    lines = [line.rstrip() for line in clean.splitlines() if line.strip()]
+    first_line = lines[0].strip() if lines else clean
+    first_token = first_line.lstrip("$># ").split(maxsplit=1)[0].lower() if first_line else ""
+    symbol_ratio = (
+        sum(1 for ch in clean if not ch.isalnum() and not ch.isspace()) / max(len(clean), 1)
+    )
+    sentence_count = len(re.findall(r"[.!?]", clean))
+    word_count = len(re.findall(r"\b\w+\b", clean))
+
+    score = 0
+    if _CODE_FENCE_RE.search(clean):
+        score += 5
+    if first_token in _SHELL_COMMAND_PREFIXES:
+        score += 3
+    if first_line.startswith(("$ ", "# ", "> ")) and first_token:
+        score += 2
+    if _CLI_FLAG_RE.search(clean):
+        score += 1
+    if _ENV_ASSIGN_RE.search(clean):
+        score += 2
+    if _IMPORT_LINE_RE.search(clean) or _DEF_LINE_RE.search(clean) or _SQL_LINE_RE.search(clean):
+        score += 3
+    if len(lines) >= 2 and symbol_ratio >= 0.14:
+        score += 2
+    if any(char in clean for char in ("{", "}", "[", "]", "=>", "::", "</", "/>")):
+        score += 1
+    if len(lines) >= 3 and any(line.startswith(("  ", "\t")) for line in lines):
+        score += 2
+
+    if _looks_like_natural_language(clean):
+        score -= 2
+    if word_count >= 80 and sentence_count >= 3:
+        score -= 2
+
+    return "snippet" if score >= 3 else "personal"
+
+
 @dataclass
 class EvidenceItem:
     source: str
@@ -112,6 +222,15 @@ class CaptureJob:
     user_id: str
     thought: str
     attempt_count: int = 0
+    source: str = "capture_thought"
+    ingest_strategy: str = "personal"
+
+
+@dataclass
+class CapturePersistResult:
+    raw_capture_id: int | None
+    job_id: int | None
+    duplicate: bool = False
 
 
 # ── Mem0 + AGE Dual-Stack ─────────────────────
@@ -197,8 +316,22 @@ def _ensure_storage_infrastructure() -> None:
         )
         cur.execute(
             """
+            ALTER TABLE memory_store.raw_captures
+            ADD COLUMN IF NOT EXISTS ingest_strategy TEXT NOT NULL DEFAULT 'personal',
+            ADD COLUMN IF NOT EXISTS external_id TEXT;
+            """
+        )
+        cur.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_raw_captures_user_created
             ON memory_store.raw_captures (user_id, created_at DESC);
+            """
+        )
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_captures_user_source_external_id
+            ON memory_store.raw_captures (user_id, source, external_id)
+            WHERE external_id IS NOT NULL;
             """
         )
         cur.execute(
@@ -231,12 +364,29 @@ def _ensure_storage_infrastructure() -> None:
             ON memory_store.capture_jobs (raw_capture_id);
             """
         )
+        cur.execute("SELECT to_regclass('public.part_config');")
+        row = cur.fetchone()
+        if row and row[0]:
+            retention_value = (
+                None if _MEMORY_RETENTION_MONTHS == 0 else f"{_MEMORY_RETENTION_MONTHS} months"
+            )
+            cur.execute(
+                """
+                UPDATE public.part_config
+                SET retention = %s,
+                    retention_keep_table = false,
+                    retention_keep_index = false
+                WHERE parent_table = 'memory_store.memories';
+                """,
+                (retention_value,),
+            )
 
 
 def _enqueue_capture_job(raw_capture_id: int, user_id: str, cur: Any | None = None) -> int | None:
     """Create or reuse one ingest job per raw capture."""
     if raw_capture_id is None:
         return None
+    user_id = _brain_user_id()
 
     def _run(cursor: Any) -> int | None:
         cursor.execute(
@@ -263,24 +413,75 @@ def _capture_raw_and_enqueue(
     thought: str,
     user_id: str,
     source: str = "capture_thought",
-) -> tuple[int | None, int | None]:
+    ingest_strategy: str | None = None,
+    external_id: str | None = None,
+) -> CapturePersistResult:
     """Persist raw text and enqueue ingestion atomically."""
     if not thought:
-        return None, None
+        return CapturePersistResult(raw_capture_id=None, job_id=None, duplicate=False)
+    user_id = _brain_user_id()
+    if ingest_strategy not in {"personal", "snippet"}:
+        ingest_strategy = _detect_auto_ingest_strategy(thought, source=source)
 
     with _db_cursor(commit=True) as (_, cur):
-        cur.execute(
-            """
-            INSERT INTO memory_store.raw_captures (user_id, source, content, content_len)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id;
-            """,
-            (user_id, source, thought, len(thought)),
-        )
-        row = cur.fetchone()
-        raw_capture_id = row[0] if row else None
+        inserted_new = True
+        if external_id:
+            cur.execute(
+                """
+                WITH inserted AS (
+                    INSERT INTO memory_store.raw_captures
+                    (user_id, source, content, content_len, ingest_strategy, external_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                )
+                SELECT id, TRUE AS inserted_new
+                FROM inserted
+                UNION ALL
+                SELECT rc.id, FALSE AS inserted_new
+                FROM memory_store.raw_captures rc
+                WHERE rc.user_id = %s
+                  AND rc.source = %s
+                  AND rc.external_id = %s
+                  AND NOT EXISTS (SELECT 1 FROM inserted)
+                LIMIT 1;
+                """,
+                (
+                    user_id,
+                    source,
+                    thought,
+                    len(thought),
+                    ingest_strategy,
+                    external_id,
+                    user_id,
+                    source,
+                    external_id,
+                ),
+            )
+            row = cur.fetchone()
+            raw_capture_id = row[0] if row else None
+            inserted_new = bool(row[1]) if row and len(row) > 1 else False
+        else:
+            cur.execute(
+                """
+                INSERT INTO memory_store.raw_captures
+                (user_id, source, content, content_len, ingest_strategy, external_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id;
+                """,
+                (user_id, source, thought, len(thought), ingest_strategy, external_id),
+            )
+            row = cur.fetchone()
+            raw_capture_id = row[0] if row else None
+
+        if raw_capture_id is None:
+            return CapturePersistResult(raw_capture_id=None, job_id=None, duplicate=False)
         job_id = _enqueue_capture_job(raw_capture_id, user_id=user_id, cur=cur)
-        return raw_capture_id, job_id
+        return CapturePersistResult(
+            raw_capture_id=raw_capture_id,
+            job_id=job_id,
+            duplicate=not inserted_new,
+        )
 
 
 def _tokenize(text: str) -> list[str]:
@@ -384,6 +585,7 @@ def _extract_relevant_snippet(content: str, query_tokens: list[str], max_len: in
 
 def _search_raw_captures(query: str, user_id: str, limit: int = 8) -> list[dict]:
     """Find recent raw captures matching query terms."""
+    user_id = _brain_user_id()
     terms = _tokenize(query)[:8]
 
     with _db_cursor() as (_, cur):
@@ -392,7 +594,7 @@ def _search_raw_captures(query: str, user_id: str, limit: int = 8) -> list[dict]
             params = [user_id, *[f"%{t}%" for t in terms], limit]
             cur.execute(
                 f"""
-                SELECT id, content, created_at, content_len
+                SELECT id, content, created_at, content_len, source
                 FROM memory_store.raw_captures
                 WHERE user_id = %s AND ({where_parts})
                 ORDER BY created_at DESC
@@ -403,7 +605,7 @@ def _search_raw_captures(query: str, user_id: str, limit: int = 8) -> list[dict]
         else:
             cur.execute(
                 """
-                SELECT id, content, created_at, content_len
+                SELECT id, content, created_at, content_len, source
                 FROM memory_store.raw_captures
                 WHERE user_id = %s
                 ORDER BY created_at DESC
@@ -419,6 +621,7 @@ def _search_raw_captures(query: str, user_id: str, limit: int = 8) -> list[dict]
                 "content": row[1],
                 "created_at": row[2],
                 "content_len": row[3],
+                "source": row[4] if len(row) > 4 else None,
             }
             for row in rows
         ]
@@ -534,10 +737,12 @@ def _build_candidates(
             text = row.get("memory") or row.get("text") or row.get("content") or str(row)
             created_at = row.get("created_at")
             score_raw = _safe_float(row.get("score"), default=1.0)
+            row_meta = row.get("metadata") or {}
             metadata = {
                 "id": row.get("id"),
                 "created_at": created_at,
                 "vector_distance": score_raw,
+                "origin": row_meta.get("origin"),
             }
         else:
             text = str(row)
@@ -575,6 +780,7 @@ def _build_candidates(
                         "raw_id": raw.get("id"),
                         "created_at": raw.get("created_at"),
                         "content_len": raw.get("content_len"),
+                        "origin": raw.get("source") or "import",
                     },
                 )
             )
@@ -774,7 +980,9 @@ def _format_sources(evidence: list[EvidenceItem]) -> list[str]:
         if source_counts.get(item.source, 0) >= source_limits.get(item.source, 1):
             continue
         text = _truncate_text(item.text, max_len=_MAX_SOURCE_TEXT)
-        lines.append(f"• [{item.source}] {text}")
+        origin = item.metadata.get("origin") if item.metadata else None
+        label = f"{item.source} • {origin}" if origin else item.source
+        lines.append(f"• [{label}] {text}")
         source_counts[item.source] = source_counts.get(item.source, 0) + 1
         if len(lines) >= _MAX_EVIDENCE:
             break
@@ -916,7 +1124,13 @@ def _extract_factual_bullets(chunk: str, max_bullets: int = 3) -> list[str]:
     return _heuristic_bullets(chunk, max_bullets=max_bullets)
 
 
-def _fallback_ingest_facts(thought: str, user_id: str, raw_capture_id: int | None) -> int:
+def _fallback_ingest_facts(
+    thought: str,
+    user_id: str,
+    raw_capture_id: int | None,
+    origin: str = "capture_thought",
+) -> int:
+    user_id = _brain_user_id()
     chunks = _chunk_text_sentences(thought, max_chunk_chars=900, max_chunks=6)
     if not chunks:
         return 0
@@ -943,14 +1157,18 @@ def _fallback_ingest_facts(thought: str, user_id: str, raw_capture_id: int | Non
     added = 0
     for idx, bullet in enumerate(all_bullets, start=1):
         try:
+            fallback_meta = {
+                "ingest_mode": "fallback_fact",
+                "raw_capture_id": raw_capture_id,
+                "fact_index": idx,
+                "origin": origin,
+            }
+            if _EMBEDDING_MODEL:
+                fallback_meta["embedding_model"] = _EMBEDDING_MODEL
             result = m.add(
                 messages=[{"role": "user", "content": bullet}],
                 user_id=user_id,
-                metadata={
-                    "ingest_mode": "fallback_fact",
-                    "raw_capture_id": raw_capture_id,
-                    "fact_index": idx,
-                },
+                metadata=fallback_meta,
                 infer=False,
             )
             added += _extract_added_count(result)
@@ -961,15 +1179,45 @@ def _fallback_ingest_facts(thought: str, user_id: str, raw_capture_id: int | Non
     return added
 
 
-def _ingest_capture(thought: str, user_id: str, raw_capture_id: int | None) -> tuple[int, int]:
-    """Run the expensive memory ingestion flow for one captured thought."""
+def _ingest_capture(
+    thought: str,
+    user_id: str,
+    raw_capture_id: int | None,
+    source: str = "capture_thought",
+    ingest_strategy: str = "personal",
+) -> tuple[int, int]:
+    """
+    Unified ingest: we always store what you send (raw), then optionally enrich.
+
+    - Every item: one memory stored verbatim (exact recall for commands, notes, or prose).
+    - Personal only: we also run LLM fact extraction (and fallback bullets if needed),
+      so you get the raw memory plus richer semantic/graph memories. Snippet = raw only.
+    """
+    user_id = _brain_user_id()
+    origin_meta = {"raw_capture_id": raw_capture_id, "origin": source}
+    if _EMBEDDING_MODEL:
+        origin_meta["embedding_model"] = _EMBEDDING_MODEL
+
+    # 1. Always store raw first (unified: exact recall for both personal and snippet).
+    raw_result = m.add(
+        messages=[{"role": "user", "content": thought}],
+        user_id=user_id,
+        metadata={**origin_meta, "ingest_mode": "raw"},
+        infer=False,
+    )
+    raw_added = _extract_added_count(raw_result)
+    logger.debug("Mem0 add (raw) result for raw_capture_id=%s: %s", raw_capture_id, raw_result)
+
+    if ingest_strategy == "snippet":
+        return raw_added, 0
+
+    # 2. Personal: also enrich (infer facts; if Mem0 returns 0, use fallback bullets).
     result = m.add(
         messages=[{"role": "user", "content": thought}],
         user_id=user_id,
-        metadata={"raw_capture_id": raw_capture_id, "ingest_mode": "primary"},
+        metadata={**origin_meta, "ingest_mode": "primary"},
     )
-    logger.debug("Mem0 add result for raw_capture_id=%s: %s", raw_capture_id, result)
-
+    logger.debug("Mem0 add (primary) result for raw_capture_id=%s: %s", raw_capture_id, result)
     added_count = _extract_added_count(result)
     fallback_added = 0
     if added_count == 0:
@@ -978,7 +1226,9 @@ def _ingest_capture(thought: str, user_id: str, raw_capture_id: int | None) -> t
             user_id,
             raw_capture_id,
         )
-        fallback_added = _fallback_ingest_facts(thought, user_id=user_id, raw_capture_id=raw_capture_id)
+        fallback_added = _fallback_ingest_facts(
+            thought, user_id=user_id, raw_capture_id=raw_capture_id, origin=source
+        )
         if fallback_added > 0:
             logger.info(
                 "Fallback ingestion added %d factual memories for user=%s raw_capture_id=%s",
@@ -993,7 +1243,7 @@ def _ingest_capture(thought: str, user_id: str, raw_capture_id: int | None) -> t
                 raw_capture_id,
             )
 
-    return added_count, fallback_added
+    return raw_added + added_count, fallback_added
 
 
 def _claim_capture_job(job_id: int | None = None) -> CaptureJob | None:
@@ -1026,7 +1276,7 @@ def _claim_capture_job(job_id: int | None = None) -> CaptureJob | None:
                 attempt_count = j.attempt_count + 1
             FROM next_job, memory_store.raw_captures r
             WHERE j.id = next_job.id AND r.id = j.raw_capture_id
-            RETURNING j.id, j.raw_capture_id, j.user_id, r.content, j.attempt_count;
+            RETURNING j.id, j.raw_capture_id, j.user_id, r.content, j.attempt_count, r.source, r.ingest_strategy;
             """,
             params,
         )
@@ -1039,6 +1289,8 @@ def _claim_capture_job(job_id: int | None = None) -> CaptureJob | None:
             user_id=row[2],
             thought=row[3],
             attempt_count=row[4],
+            source=(row[5] if len(row) > 5 else "capture_thought"),
+            ingest_strategy=(row[6] if len(row) > 6 else "personal"),
         )
 
 
@@ -1113,6 +1365,8 @@ def _process_capture_job(job: CaptureJob) -> bool:
             thought=job.thought,
             user_id=job.user_id,
             raw_capture_id=job.raw_capture_id,
+            source=job.source,
+            ingest_strategy=job.ingest_strategy,
         )
         duration_ms = (time.perf_counter() - started_at) * 1000
         _mark_capture_job_done(job, added_count=added_count, fallback_added=fallback_added, duration_ms=duration_ms)
@@ -1211,25 +1465,31 @@ def stop_background_workers(timeout: float = 1.0) -> None:
 _ensure_storage_infrastructure()
 
 
-def capture_thought(thought: str, user_id: str = "default") -> str:
+def capture_thought(thought: str) -> str:
     """
-    Saves a new memory into the user's Open Brain.
-    Call this when the user makes a decision, meets someone, or specifies a constraint.
+    Saves a new memory into the local OpenBrain instance.
+    The system automatically decides whether to enrich the text or keep it raw-only.
     """
     thought = (thought or "").strip()
     if not thought:
         return "Warning: Please provide a non-empty thought."
+    brain_id = _brain_user_id()
 
-    logger.info("Capturing thought for user=%s (len=%d)", user_id, len(thought))
+    logger.info("Capturing thought (len=%d)", len(thought))
     started_at = time.perf_counter()
 
     try:
-        raw_capture_id, job_id = _capture_raw_and_enqueue(thought, user_id=user_id, source="capture_thought")
+        persist_result = _capture_raw_and_enqueue(
+            thought,
+            user_id=brain_id,
+            source="capture_thought",
+        )
+        raw_capture_id = persist_result.raw_capture_id
+        job_id = persist_result.job_id
         queue_stats = get_capture_job_stats()
         accept_ms = (time.perf_counter() - started_at) * 1000
         logger.info(
-            "Capture accepted user=%s raw_capture_id=%s job_id=%s accept_ms=%.1f queue_depth=%d processing=%d failed=%d",
-            user_id,
+            "Capture accepted raw_capture_id=%s job_id=%s accept_ms=%.1f queue_depth=%d processing=%d failed=%d",
             raw_capture_id,
             job_id,
             accept_ms,
@@ -1238,8 +1498,8 @@ def capture_thought(thought: str, user_id: str = "default") -> str:
             queue_stats.get("failed", 0),
         )
     except Exception as e:
-        logger.error("Memory capture enqueue failed for user=%s: %s", user_id, e)
-        return f"Warning: Failed to persist memory. Error: {e}"
+        logger.error("Memory capture enqueue failed: %s", e)
+        return f"Warning: Failed to persist memory. Error: {e}.{_PERSIST_ERROR_HINT}"
 
     if _CAPTURE_MODE == "sync":
         if job_id is None:
@@ -1251,21 +1511,91 @@ def capture_thought(thought: str, user_id: str = "default") -> str:
     return _CAPTURE_ACK_TEXT
 
 
-def search_brain(query: str, user_id: str = "default", debug: bool = False) -> str:
+def ingest(
+    content: str,
+    source: str = "import",
+    external_id: str | None = None,
+) -> str:
     """
-    Searches the user's past memories via vector similarity and knowledge graph.
+    Flexible ingest: one entry point for any channel (chat exports, notes, etc.).
+
+    Use this to feed ChatGPT/Claude/Antigravity exports, PC/phone notes, or any
+    other source. Content is queued for the same Mem0 + AGE pipeline; search_brain
+    searches across all sources.
+
+    Args:
+        content: Text to remember (one message, one note, or merged chunk).
+        source: Origin identifier, e.g. "chatgpt", "claude", "antigravity",
+                "notes_pc", "notes_phone", "import". Stored for provenance and filtering.
+        external_id: Optional stable id (e.g. conversation_id, note_id). When set,
+                     re-ingesting the same source/external_id pair is skipped (dedup).
+
+    Returns:
+        Success or warning message.
+    """
+    content = (content or "").strip()
+    if not content:
+        return "Warning: Please provide non-empty content."
+    brain_id = _brain_user_id()
+
+    logger.info("Ingest source=%s len=%d", source, len(content))
+    started_at = time.perf_counter()
+
+    try:
+        persist_result = _capture_raw_and_enqueue(
+            content,
+            user_id=brain_id,
+            source=source,
+            external_id=external_id,
+        )
+        raw_capture_id = persist_result.raw_capture_id
+        job_id = persist_result.job_id
+        if persist_result.duplicate:
+            logger.info(
+                "Ingest skipped atomically (dedup) source=%s external_id=%s raw_capture_id=%s",
+                source,
+                external_id,
+                raw_capture_id,
+            )
+            return "Already ingested (skipped duplicate for this source and id)."
+        queue_stats = get_capture_job_stats()
+        accept_ms = (time.perf_counter() - started_at) * 1000
+        logger.info(
+            "Ingest accepted source=%s raw_capture_id=%s job_id=%s accept_ms=%.1f queue_depth=%d",
+            source,
+            raw_capture_id,
+            job_id,
+            accept_ms,
+            queue_stats.get("queued", 0),
+        )
+    except Exception as e:
+        logger.error("Ingest enqueue failed source=%s: %s", source, e)
+        return f"Warning: Failed to persist. Error: {e}.{_PERSIST_ERROR_HINT}"
+
+    if _CAPTURE_MODE == "sync" and job_id is not None and _process_capture_job_by_id(job_id):
+        return "Ingested and indexed."
+    if _CAPTURE_MODE == "sync":
+        return "Warning: Ingest queued but synchronous processing did not complete."
+
+    return "Ingested and queued for indexing."
+
+
+def search_brain(query: str, debug: bool = False) -> str:
+    """
+    Searches stored memories via vector similarity and knowledge graph.
     Returns answer-first output with concise sources. Use debug=True for trace output.
     """
-    logger.info("Searching brain for user=%s query=%r debug=%s", user_id, query[:80], debug)
+    brain_id = _brain_user_id()
+    logger.info("Searching brain query=%r debug=%s", query[:80], debug)
 
-    memories_payload = m.search(query=query, user_id=user_id, limit=10)
+    memories_payload = m.search(query=query, user_id=brain_id, limit=10)
     vector_results, relations = _extract_vector_and_relations(memories_payload)
 
     raw_matches: list[dict] = []
     try:
-        raw_matches = _search_raw_captures(query=query, user_id=user_id, limit=8)
+        raw_matches = _search_raw_captures(query=query, user_id=brain_id, limit=8)
     except Exception as e:
-        logger.warning("Raw capture search failed for user=%s: %s", user_id, e)
+        logger.warning("Raw capture search failed: %s", e)
 
     candidates = _build_candidates(query, vector_results=vector_results, relations=relations, raw_matches=raw_matches)
     ranked, ranking_debug = _rank_evidence(query=query, candidates=candidates)

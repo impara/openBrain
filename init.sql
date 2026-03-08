@@ -9,7 +9,9 @@
 --   public schema) using the configured `collection_name` as a logical grouping.
 --   The `memory_store.memories` partitioned table below serves as a *parallel*
 --   storage layer for direct queries, analytics, and admin access independent
---   of Mem0's abstractions.  Both write paths target the same Postgres instance.
+--   of Mem0's abstractions. OpenBrain's runtime capture/search flow does not
+--   write to this table today; the retention settings below apply only to this
+--   optional partitioned store.
 -- ============================================================================
 
 -- 1. Enable Required Extensions
@@ -29,11 +31,21 @@ CREATE TABLE IF NOT EXISTS memory_store.raw_captures (
     source TEXT NOT NULL DEFAULT 'capture_thought',
     content TEXT NOT NULL,
     content_len INTEGER NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ingest_strategy TEXT NOT NULL DEFAULT 'personal' CHECK (ingest_strategy IN ('personal', 'snippet')),
+    external_id TEXT
 );
+
+ALTER TABLE memory_store.raw_captures
+ADD COLUMN IF NOT EXISTS ingest_strategy TEXT NOT NULL DEFAULT 'personal',
+ADD COLUMN IF NOT EXISTS external_id TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_raw_captures_user_created
 ON memory_store.raw_captures (user_id, created_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_captures_user_source_external_id
+ON memory_store.raw_captures (user_id, source, external_id)
+WHERE external_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS memory_store.capture_jobs (
     id BIGSERIAL PRIMARY KEY,
@@ -103,17 +115,33 @@ SELECT public.create_parent(
 --
 -- RETENTION NOTE:
 --   For a "brain" system, auto-deleting old memories may be counterproductive.
---   The current 12-month setting deletes partitions older than 1 year.
+--   This retention setting only affects memory_store.memories, the optional
+--   partitioned admin table described above.
 --   Consider adjusting or removing this based on your use case:
---     - Remove retention:       SET retention = NULL
+--     - Remove retention:       set MEMORY_RETENTION_MONTHS=0
 --     - Archive instead:        SET retention_keep_table = true (detaches but preserves)
 --     - Longer window:          SET retention = '60 months'
---     - Environment-controlled: Override MEMORY_RETENTION_MONTHS via an init wrapper
-UPDATE public.part_config
-SET retention = '12 months',
-    retention_keep_table = false,
-    retention_keep_index = false
-WHERE parent_table = 'memory_store.memories';
+--     - Environment-controlled: MEMORY_RETENTION_MONTHS is read from
+--                               custom Postgres setting openbrain.memory_retention_months
+DO $$
+DECLARE
+    retention_months INTEGER := GREATEST(
+        COALESCE(
+            NULLIF(current_setting('openbrain.memory_retention_months', true), '')::INTEGER,
+            12
+        ),
+        0
+    );
+BEGIN
+    UPDATE public.part_config
+    SET retention = CASE
+            WHEN retention_months = 0 THEN NULL
+            ELSE format('%s months', retention_months)
+        END,
+        retention_keep_table = false,
+        retention_keep_index = false
+    WHERE parent_table = 'memory_store.memories';
+END $$;
 
 -- 8. Automate Partition Maintenance (Midnight Cron)
 SELECT cron.schedule(

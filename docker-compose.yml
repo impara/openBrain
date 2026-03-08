@@ -14,7 +14,7 @@ services:
     volumes:
       - brain_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
-    command: postgres -c shared_preload_libraries='age,pg_cron' -c cron.database_name='${POSTGRES_DB}'
+    command: postgres -c shared_preload_libraries='age,pg_cron' -c cron.database_name='${POSTGRES_DB}' -c openbrain.memory_retention_months='${MEMORY_RETENTION_MONTHS:-12}'
     restart: unless-stopped
     networks:
       - brain_net

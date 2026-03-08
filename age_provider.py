@@ -47,6 +47,7 @@ class _GraphExtraction(BaseModel):
 # We implement the interface expected by Memory.py directly instead.
 
 logger = logging.getLogger(__name__)
+_SINGLE_USER_ID = "default"
 
 # ── Validation Constants ──────────────────────
 _LABEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
@@ -63,12 +64,12 @@ class ApacheAGEProvider:
         """Minimal add implementation for Mem0 compatibility."""
         logger.debug("Graph add called with data=%r filters=%r", data[:50], filters)
 
-        user_id = filters.get("user_id", "default")
+        user_id = _SINGLE_USER_ID
         
         try:
             extraction_instruction = (
                 "Extract entities and relationships from the text to build a knowledge graph. "
-                f"Resolve self-references like 'I' or 'my' to the User ID '{user_id}'. "
+                f"Resolve self-references like 'I' or 'my' to the local OpenBrain user '{user_id}'. "
                 "Make entities discrete and relationships concise."
             )
             json_shape_instruction = (
@@ -385,7 +386,7 @@ class ApacheAGEProvider:
         Returns a dict with 'nodes' and 'edges' lists containing parsed dicts.
         """
         safe_limit = max(1, min(int(limit), 100))
-        user_id = (filters or {}).get("user_id", "default")
+        user_id = _SINGLE_USER_ID
         safe_user = self._escape_cypher_string(str(user_id))
 
         # Extract searchable terms > 2 chars, validate each

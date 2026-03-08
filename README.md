@@ -2,7 +2,11 @@
 
 **Agentic memory framework with semantic recall + relational reasoning.**
 
+This repository is intentionally **single-user**. The public API is one local brain by design: capture, ingest, and search all operate on the same memory store.
+
 Give your AI agent a persistent memory that remembers *what* happened (vector search) and *why* it matters (knowledge graph) — all from a single Postgres instance, exposed as MCP tools.
+
+For **multi-source ingestion** (ChatGPT/Claude/Antigravity exports, PC/phone notes, etc.), see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -41,10 +45,12 @@ Give your AI agent a persistent memory that remembers *what* happened (vector se
 |-----------|------|
 | **pgvector** | 1536-dim HNSW vector search for semantic memory recall |
 | **Apache AGE** | Cypher-based knowledge graph for entity relationships |
-| **pg_partman** | Monthly time-range partitioning with auto-maintenance |
-| **pg_cron** | Nightly partition creation / retention cleanup |
+| **pg_partman** | Optional monthly partitioning for the example admin table `memory_store.memories` |
+| **pg_cron** | Maintenance for that optional partitioned admin table |
 | **Mem0** | Embedding generation + entity extraction via OpenAI |
 | **MCP** | Tool protocol for agent integration via Streamable HTTP or stdio |
+
+Schema: main tables (`raw_captures`, `capture_jobs`) and key indexes are summarized in [ARCHITECTURE.md §6](ARCHITECTURE.md#6-schema-summary).
 
 ---
 
@@ -84,7 +90,7 @@ docker compose exec open-brain-db psql -U brain_user -d open_brain \
   -c "SELECT extname FROM pg_extension;"
 # Expected: vector, pg_partman, pg_cron, age
 
-# Verify partitions
+# Verify optional admin-table partitions
 docker compose exec open-brain-db psql -U brain_user -d open_brain \
   -c "SELECT tablename FROM pg_tables WHERE schemaname = 'memory_store';"
 ```
@@ -95,12 +101,21 @@ docker compose exec open-brain-db psql -U brain_user -d open_brain \
 
 ### `capture_thought`
 
-Saves a new memory into the user's brain. Call this when the user makes a decision, meets someone, or specifies a constraint.
+Saves a new memory. **Everything is stored verbatim**, and OpenBrain automatically decides whether to also enrich it with fact extraction. This is the default path for normal use.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `thought` | `str` | required | The memory content to capture |
-| `user_id` | `str` | `"default"` | Isolates memories per user |
+
+### `ingest`
+
+Flexible entry point for any channel (chat exports, notes, imports). **Everything is stored verbatim**, and OpenBrain automatically decides whether to also enrich it with fact extraction.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `content` | `str` | required | Text to remember (one message, note, or merged chunk) |
+| `source` | `str` | `"import"` | Origin: e.g. `chatgpt`, `claude`, `antigravity`, `notes_pc`, `notes_phone` |
+| `external_id` | `str` \| `null` | `null` | Optional stable id for dedup (e.g. conversation or note id) |
 
 ### `search_brain`
 
@@ -109,7 +124,6 @@ Searches past memories via vector similarity and knowledge graph. Call this BEFO
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `query` | `str` | required | Natural language search query |
-| `user_id` | `str` | `"default"` | Which user's brain to search |
 
 ---
 
@@ -126,13 +140,21 @@ All configuration is via environment variables (`.env` file):
 | `POSTGRES_PORT` | No | `5432` | DB port |
 | `MCP_PORT` | No | `8000` | Host port mapped to MCP server container port 8000 |
 | `OPENAI_API_KEY` | **Yes** | — | OpenAI API key for Mem0 |
-| `MEMORY_RETENTION_MONTHS` | No | `12` | Partition retention window |
+| `OPENBRAIN_EMBEDDING_MODEL` | No | — | If set, stored in Mem0 memory metadata for re-embedding or A/B model tracking (e.g. `text-embedding-3-small`) |
+| `MCP_TRANSPORT` | No | `streamable-http` | MCP transport: `streamable-http` (default) or `stdio` for local IDE |
+| `MEMORY_RETENTION_MONTHS` | No | `12` | Retention window for the optional `memory_store.memories` admin table; `0` disables retention |
 | `OPENBRAIN_CAPTURE_MODE` | No | `async` | `async` queues `/remember` for background indexing, `sync` blocks until ingestion finishes |
 | `OPENBRAIN_INGEST_WORKERS` | No | `1` | Number of in-process capture workers per service |
 | `OPENBRAIN_INGEST_POLL_MS` | No | `250` | Poll interval for queued capture jobs |
 | `LOG_LEVEL` | No | `INFO` | Python log level |
 | `TELEGRAM_BOT_TOKEN` | No | — | Telegram bot token from @BotFather |
 | `TELEGRAM_AUTO_CAPTURE` | No | `false` | Auto-save plain text messages as thoughts |
+
+---
+
+## MCP transport
+
+The MCP server uses **streamable-http** by default (e.g. in Docker it listens on port 8000 at `/mcp`). To use **stdio** for local IDE integration (Cursor, Claude Desktop, etc.), set `MCP_TRANSPORT=stdio` and run the server so the IDE can spawn it and talk over stdin/stdout. See [IDE Integration](#ide-integration) below for config examples.
 
 ---
 
@@ -156,7 +178,7 @@ When running via Docker, the MCP server exposes a Streamable HTTP endpoint. Any 
 
 ### Local (stdio)
 
-For direct local integration (e.g., Claude Desktop), pipe into the Docker container:
+For local IDE or Claude Desktop, run the server with stdio so the client spawns it. Example: Docker container with `MCP_TRANSPORT=stdio`:
 
 ```json
 {
@@ -189,11 +211,11 @@ Chat with your brain from Telegram using `/remember` and `/search` commands.
 | Command | Description |
 |---------|-------------|
 | `/start` | Welcome message + usage |
-| `/remember <text>` | Save a thought to your brain |
+| `/remember <text>` | Save anything; OpenBrain auto-detects enrichment |
 | `/search <query>` | Search your memories |
 | `/help` | Show available commands |
 
-Memories are isolated by Telegram user ID (`telegram_<id>`).
+This repository runs one local brain. Telegram messages go into that same single-user store.
 In the default `OPENBRAIN_CAPTURE_MODE=async`, `/remember` acknowledges immediately after durable queueing and finishes semantic indexing in the background.
 
 Set `TELEGRAM_AUTO_CAPTURE=true` in `.env` to auto-save all plain text messages.
@@ -241,6 +263,7 @@ openBrain/
 ├── mcp.json              # MCP server config reference for IDE integration
 ├── requirements.txt      # Pinned Python dependencies
 ├── .env.example          # Environment variable template
+├── connectors/           # Example: ingest_chat_export.py for JSON chat exports
 └── tests/                # Unit and integration tests
 ```
 

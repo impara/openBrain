@@ -25,7 +25,7 @@ docker compose exec open-brain-db psql -U brain_user -d open_brain -c "SELECT ex
 ---
 
 ## 2. Unit Testing
-Run the full test suite (29 tests) covering the Apache AGE provider, Cypher injection protection, and regression fixes.
+Run the full test suite covering the Apache AGE provider, Cypher injection protection, async queue behavior, auto-classification, and regression fixes.
 
 ### Run Local Tests
 Requires dependencies installed (`pip install -r requirements.txt`):
@@ -43,13 +43,13 @@ docker compose exec open-brain-mcp python -m pytest tests/ -v
 ## 3. Database Verification (Manual Audit)
 
 ### Check Partitioning (pg_partman)
-Verify that the `memories` table is partitioned by month:
+Verify that the optional admin table `memory_store.memories` is partitioned by month:
 ```bash
 docker compose exec open-brain-db psql -U brain_user -d open_brain -c "\d+ memory_store.memories"
 ```
 
 ### Check HNSW Index Choice
-Verify that the semantic index is created with correct parameters ($m=16, ef\_construction=128$):
+Verify that the optional admin table index is created with correct parameters ($m=16, ef\_construction=128$):
 ```bash
 docker compose exec open-brain-db psql -U brain_user -d open_brain -c "SELECT indexdef FROM pg_indexes WHERE indexname LIKE '%embedding%';"
 ```
@@ -82,7 +82,7 @@ You can still run a python script to test the logic directly:
 1. Ensure the containers are running.
 2. Run:
 ```bash
-docker compose exec open-brain-mcp python -c "from brain_core import capture_thought; print(capture_thought('Testing background brain.', user_id='test1'))"
+docker compose exec open-brain-mcp python -c "from brain_core import capture_thought; print(capture_thought('Testing background brain.'))"
 ```
 
 ### Telegram Bot Verification

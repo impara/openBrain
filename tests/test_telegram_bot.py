@@ -30,7 +30,6 @@ with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token", "POSTGRES_PAS
         search_handler,
         search_debug_handler,
         text_handler,
-        _user_id,
     )
 
 
@@ -56,17 +55,6 @@ def mock_context():
 
 # ── Tests ─────────────────────────────────────
 
-class TestUserIdMapping:
-    """Test Telegram user_id → OpenBrain user_id mapping."""
-
-    def test_maps_telegram_id(self, mock_update):
-        assert _user_id(mock_update) == "default"
-
-    def test_different_users_get_different_ids(self, mock_update):
-        mock_update.effective_user.id = 99999
-        assert _user_id(mock_update) == "default"
-
-
 class TestStartHandler:
     """Test /start command."""
 
@@ -77,6 +65,7 @@ class TestStartHandler:
         text = mock_update.message.reply_text.call_args[0][0]
         assert "OpenBrain" in text
         assert "/remember" in text
+        assert "/snippet" not in text
         assert "/search" in text
         assert "/search_debug" in text
 
@@ -90,6 +79,7 @@ class TestHelpHandler:
         mock_update.message.reply_text.assert_called_once()
         text = mock_update.message.reply_text.call_args[0][0]
         assert "/remember" in text
+        assert "/snippet" not in text
         assert "/search" in text
         assert "/search_debug" in text
 
@@ -102,7 +92,7 @@ class TestRememberHandler:
         mock_context.args = ["I", "prefer", "dark", "mode"]
         with patch("telegram_bot.asyncio.to_thread", new=AsyncMock(return_value="Thought captured and queued for indexing.")) as mock_to_thread:
             await remember_handler(mock_update, mock_context)
-        mock_to_thread.assert_awaited_once_with(remember_handler.__globals__["capture_thought"], "I prefer dark mode", user_id="default")
+        mock_to_thread.assert_awaited_once_with(remember_handler.__globals__["capture_thought"], "I prefer dark mode")
         text = mock_update.message.reply_text.call_args[0][0]
         assert "✅" in text
 
@@ -114,11 +104,11 @@ class TestRememberHandler:
         assert "⚠️" in text
 
     @pytest.mark.asyncio
-    async def test_uses_telegram_user_id(self, mock_update, mock_context):
+    async def test_calls_single_brain_capture_api(self, mock_update, mock_context):
         mock_context.args = ["test", "thought"]
         with patch("telegram_bot.asyncio.to_thread", new=AsyncMock(return_value="ok")) as mock_to_thread:
             await remember_handler(mock_update, mock_context)
-            mock_to_thread.assert_awaited_once_with(remember_handler.__globals__["capture_thought"], "test thought", user_id="default")
+            mock_to_thread.assert_awaited_once_with(remember_handler.__globals__["capture_thought"], "test thought")
 
     @pytest.mark.asyncio
     async def test_handles_error(self, mock_update, mock_context):
@@ -133,7 +123,7 @@ class TestRememberHandler:
         mock_context.args = ["slow", "capture"]
         with patch("telegram_bot.asyncio.to_thread", new=AsyncMock(return_value="queued")) as mock_to_thread:
             await remember_handler(mock_update, mock_context)
-        mock_to_thread.assert_awaited_once_with(remember_handler.__globals__["capture_thought"], "slow capture", user_id="default")
+        mock_to_thread.assert_awaited_once_with(remember_handler.__globals__["capture_thought"], "slow capture")
 
 
 class TestSearchHandler:
@@ -142,8 +132,14 @@ class TestSearchHandler:
     @pytest.mark.asyncio
     async def test_searches_brain(self, mock_update, mock_context):
         mock_context.args = ["dark", "mode"]
-        with patch("telegram_bot.search_brain", return_value="=== Retrieved Brain Context ===\n- dark mode\n"):
+        with patch(
+            "telegram_bot.asyncio.to_thread",
+            new=AsyncMock(return_value="=== Retrieved Brain Context ===\n- dark mode\n"),
+        ) as mock_to_thread:
             await search_handler(mock_update, mock_context)
+        mock_to_thread.assert_awaited_once_with(
+            search_handler.__globals__["search_brain"], "dark mode", debug=False
+        )
         text = mock_update.message.reply_text.call_args[0][0]
         assert "Brain Context" in text
 
@@ -155,16 +151,18 @@ class TestSearchHandler:
         assert "⚠️" in text
 
     @pytest.mark.asyncio
-    async def test_uses_telegram_user_id(self, mock_update, mock_context):
+    async def test_calls_single_brain_search_api(self, mock_update, mock_context):
         mock_context.args = ["query"]
-        with patch("telegram_bot.search_brain", return_value="results") as mock_search:
+        with patch("telegram_bot.asyncio.to_thread", new=AsyncMock(return_value="results")) as mock_to_thread:
             await search_handler(mock_update, mock_context)
-            mock_search.assert_called_once_with("query", user_id="default", debug=False)
+            mock_to_thread.assert_awaited_once_with(
+                search_handler.__globals__["search_brain"], "query", debug=False
+            )
 
     @pytest.mark.asyncio
     async def test_handles_error(self, mock_update, mock_context):
         mock_context.args = ["test"]
-        with patch("telegram_bot.search_brain", side_effect=RuntimeError("DB down")):
+        with patch("telegram_bot.asyncio.to_thread", new=AsyncMock(side_effect=RuntimeError("DB down"))):
             await search_handler(mock_update, mock_context)
         text = mock_update.message.reply_text.call_args[0][0]
         assert "❌" in text
@@ -184,7 +182,7 @@ class TestAutoCapture:
         with patch("telegram_bot.AUTO_CAPTURE", True), \
              patch("telegram_bot.asyncio.to_thread", new=AsyncMock(return_value="ok")) as mock_to_thread:
             await text_handler(mock_update, mock_context)
-        mock_to_thread.assert_awaited_once_with(text_handler.__globals__["capture_thought"], "Hello world", user_id="default")
+        mock_to_thread.assert_awaited_once_with(text_handler.__globals__["capture_thought"], "Hello world")
         mock_update.message.reply_text.assert_called_once()
         text = mock_update.message.reply_text.call_args[0][0]
         assert "💭" in text
@@ -196,8 +194,11 @@ class TestSearchDebugHandler:
     @pytest.mark.asyncio
     async def test_searches_brain_in_debug_mode(self, mock_update, mock_context):
         mock_context.args = ["dark", "mode"]
-        with patch("telegram_bot.search_brain", return_value="=== Search Debug ==="):
+        with patch("telegram_bot.asyncio.to_thread", new=AsyncMock(return_value="=== Search Debug ===")) as mock_to_thread:
             await search_debug_handler(mock_update, mock_context)
+        mock_to_thread.assert_awaited_once_with(
+            search_debug_handler.__globals__["search_brain"], "dark mode", debug=True
+        )
         text = mock_update.message.reply_text.call_args[0][0]
         assert "Search Debug" in text
 
@@ -209,8 +210,10 @@ class TestSearchDebugHandler:
         assert "⚠️" in text
 
     @pytest.mark.asyncio
-    async def test_uses_telegram_user_id(self, mock_update, mock_context):
+    async def test_calls_single_brain_debug_search_api(self, mock_update, mock_context):
         mock_context.args = ["query"]
-        with patch("telegram_bot.search_brain", return_value="debug") as mock_search:
+        with patch("telegram_bot.asyncio.to_thread", new=AsyncMock(return_value="debug")) as mock_to_thread:
             await search_debug_handler(mock_update, mock_context)
-            mock_search.assert_called_once_with("query", user_id="default", debug=True)
+            mock_to_thread.assert_awaited_once_with(
+                search_debug_handler.__globals__["search_brain"], "query", debug=True
+            )
