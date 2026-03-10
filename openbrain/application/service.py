@@ -13,11 +13,16 @@ from openbrain.domain.ports import (
 )
 from openbrain.domain.search import (
     build_candidates,
+    detect_search_intent,
     format_debug_report,
     format_search_response,
     rank_evidence,
 )
-from openbrain.domain.text import chunk_text_sentences, detect_auto_ingest_strategy, normalized_text
+from openbrain.domain.text import (
+    chunk_text_passages,
+    detect_auto_ingest_strategy,
+    normalized_text,
+)
 from openbrain.infrastructure.repositories import OpenBrainRepositories
 from openbrain.settings import OpenBrainSettings
 
@@ -143,22 +148,28 @@ class OpenBrainApplication:
         if not (query or "").strip():
             return "Answer: Please provide a non-empty search query."
 
+        intent = detect_search_intent(query)
         query_embedding = self.embedding_provider.embed(query)
         vector_results = self.vector_repo.search_vectors(
             query_embedding,
             user_id=self.brain_user_id(),
-            limit=10,
+            limit=12 if intent == "reference" else 10,
+            ingest_modes=("raw",) if intent == "reference" else ("raw", "fact"),
         )
-        raw_matches = self.repositories.search_raw(query, user_id=self.brain_user_id(), limit=8)
-        relations = self.graph_repo.search(query, limit=5)
+        raw_matches = self.repositories.search_raw(
+            query,
+            user_id=self.brain_user_id(),
+            limit=12 if intent == "reference" else 8,
+        )
+        relations = {"nodes": [], "edges": []} if intent == "reference" else self.graph_repo.search(query, limit=5)
         candidates = build_candidates(query, vector_results, relations, raw_matches)
-        evidence, ranking_debug = rank_evidence(query, candidates)
+        evidence, ranking_debug = rank_evidence(query, candidates, intent=intent)
         if debug:
             return format_debug_report(query, ranking_debug, evidence)
         return format_search_response(query, evidence)
 
     def _build_memory_chunks(self, thought: str, *, raw_capture_id: int, source: str, ingest_mode: str) -> list[MemoryChunk]:
-        chunks = chunk_text_sentences(thought, max_chunk_chars=900, max_chunks=6)
+        chunks = chunk_text_passages(thought, max_chunk_chars=420, max_chunks=12)
         results: list[MemoryChunk] = []
         for idx, chunk in enumerate(chunks, start=1):
             results.append(
@@ -177,6 +188,7 @@ class OpenBrainApplication:
                         "origin": source,
                         "raw_capture_id": raw_capture_id,
                         "ingest_mode": ingest_mode,
+                        "representation": "passage",
                     },
                 )
             )
@@ -185,7 +197,7 @@ class OpenBrainApplication:
     def _build_fact_chunks(self, thought: str, *, raw_capture_id: int, source: str) -> list[MemoryChunk]:
         bullets: list[str] = []
         seen: set[str] = set()
-        for chunk in chunk_text_sentences(thought, max_chunk_chars=900, max_chunks=6):
+        for chunk in chunk_text_passages(thought, max_chunk_chars=420, max_chunks=12):
             for bullet in self.bullet_extractor.extract(chunk, max_bullets=3):
                 norm = normalized_text(bullet)
                 if not norm or norm in seen or len(norm.split()) < 5:
@@ -216,6 +228,7 @@ class OpenBrainApplication:
                         "raw_capture_id": raw_capture_id,
                         "ingest_mode": "fact",
                         "fact_index": idx,
+                        "representation": "fact",
                     },
                 )
             )

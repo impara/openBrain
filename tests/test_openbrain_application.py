@@ -56,13 +56,21 @@ class FakeVectorRepo:
     def __init__(self):
         self.upsert_calls = []
         self.search_results = []
+        self.search_calls = []
 
     def upsert_chunks(self, chunks):
         self.upsert_calls.append(chunks)
         return len(chunks)
 
-    def search_vectors(self, query_embedding, *, user_id, limit=10):
-        del query_embedding, user_id, limit
+    def search_vectors(self, query_embedding, *, user_id, limit=10, ingest_modes=None):
+        self.search_calls.append(
+            {
+                "query_embedding": list(query_embedding),
+                "user_id": user_id,
+                "limit": limit,
+                "ingest_modes": ingest_modes,
+            }
+        )
         return list(self.search_results)
 
 
@@ -141,7 +149,6 @@ def make_settings(**overrides) -> OpenBrainSettings:
         capture_mode="async",
         ingest_workers=1,
         ingest_poll_ms=250,
-        memory_retention_months=12,
         graph_name="brain_graph_v2",
         log_level="INFO",
     )
@@ -336,3 +343,29 @@ def test_search_brain_answers_quote_style_queries_with_matching_passage():
     result = app.search_brain("What does 28:88 say", debug=False)
     assert "28:88 says" in result
     assert "Everything is perishing except His Face" in result
+    assert "49:13" not in result
+    assert vector_repo.search_calls[0]["ingest_modes"] == ("raw",)
+
+
+def test_ingest_capture_personal_preserves_paragraph_boundaries_for_raw_chunks():
+    app, _, vector_repo, _ = make_app()
+    thought = (
+        "First paragraph with a complete idea.\n\n"
+        "Second paragraph with another distinct idea and a citation (28:88).\n\n"
+        "Third paragraph closing the thought."
+    )
+    added, fact_added = app.ingest_capture(
+        thought=thought,
+        user_id="default",
+        raw_capture_id=9,
+        source="capture_thought",
+        ingest_strategy="personal",
+    )
+    assert added >= 3
+    assert fact_added >= 1
+    raw_chunks = vector_repo.upsert_calls[0]
+    assert [chunk.content for chunk in raw_chunks][:3] == [
+        "First paragraph with a complete idea.",
+        "Second paragraph with another distinct idea and a citation (28:88).",
+        "Third paragraph closing the thought.",
+    ]

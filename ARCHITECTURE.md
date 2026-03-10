@@ -6,7 +6,33 @@ This repository runs as **one local brain**. Public entrypoints are single-user 
 
 ---
 
-## 1. Design principles
+## 1. Architecture philosophy
+
+OpenBrain intentionally keeps **vectors, graph data, and raw source material inside one PostgreSQL system**.
+
+The main architectural bet is that, for a personal memory engine, the operational cost of splitting vector search and graph traversal across different databases is worse than the limitations of keeping them together. A separate graph database would introduce:
+
+- duplicated identifiers and entity-matching logic across systems
+- partial-write failure modes when one database succeeds and the other does not
+- query stitching in application code whenever search results need graph context
+- separate backup, restore, scaling, and debugging workflows
+
+For this project, the important graph queries are shallow-to-medium traversals around entities, concepts, and related memories. That fits Apache AGE well enough, while keeping pgvector and the graph under the same operational roof.
+
+The project originally leaned on Mem0 to absorb extraction and graph-writing complexity. OpenBrain now owns that logic itself. The reason is not ideological; it is about control. Provider selection, chunking strategy, extraction behavior, retrieval ranking, and citation-quality search all turned out to be core product behavior. Once those became product-defining, they had to live inside the application rather than behind an external abstraction.
+
+The result is a simpler mental model:
+
+- `raw_captures` is the source of truth
+- `memory_chunks` is the runtime retrieval index for raw passages and extracted facts
+- Apache AGE is the relational index for entities and edges
+- the OpenBrain application owns ingestion, enrichment, and ranking policy
+
+This keeps one unified database strategy without outsourcing the actual memory behavior.
+
+---
+
+## 2. Design principles
 
 - **One memory store**: All sources write into the same OpenBrain-owned vector + graph + `raw_captures` pipeline. Search is global across sources; you can still filter or label by source when needed.
 - **Source as first-class field**: Every ingested item has a `source` (e.g. `chatgpt`, `notes_phone`). It is stored in `raw_captures.source`, copied into `memory_chunks.source` and chunk metadata `origin`, and **shown in search results** so you can see where each memory came from.
@@ -16,7 +42,7 @@ This repository runs as **one local brain**. Public entrypoints are single-user 
 
 ---
 
-## 2. Recommended architecture (high level)
+## 3. Recommended architecture (high level)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -54,7 +80,7 @@ This repository runs as **one local brain**. Public entrypoints are single-user 
 
 ---
 
-## 3. Source taxonomy
+## 4. Source taxonomy
 
 Use a small, stable set of source identifiers so search and analytics stay consistent:
 
@@ -73,7 +99,7 @@ You can add more (e.g. `obsidian`, `notion`) without changing core; just pass th
 
 ---
 
-## 3.1. Unified ingest: automatic enrichment selection
+## 4.1. Unified ingest: automatic enrichment selection
 
 You don’t have to choose “will this be stored?” — **everything you send is stored verbatim**. The only choice is whether we **also** enrich it.
 
@@ -88,7 +114,7 @@ So: **one rule** — we always keep what you sent. The public API always enters 
 
 ---
 
-## 4. Retrieval
+## 5. Retrieval
 
 Search is **hybrid** and **single-user**:
 
@@ -99,7 +125,7 @@ Search is **hybrid** and **single-user**:
 
 ---
 
-## 5. Chunking
+## 6. Chunking
 
 Chunking is **semantic-ish** and differs by path:
 
@@ -109,7 +135,7 @@ Chunking is **semantic-ish** and differs by path:
 
 ---
 
-## 6. Schema (summary)
+## 7. Schema (summary)
 
 Main application tables:
 
@@ -119,14 +145,14 @@ Main application tables:
 | `memory_store.capture_jobs` | Queue for async ingestion; links to `raw_captures`, has `status`, `attempt_count`, `available_at`, `last_error`. |
 | `memory_store.memory_chunks` | Runtime vector storage for raw chunks and extracted facts; owned by OpenBrain and created at bootstrap using the configured embedding dimensions. |
 
-Key indexes: `idx_raw_captures_user_created`, `idx_raw_captures_user_source_external_id` (partial, for dedup), `idx_capture_jobs_status_available_created`, and the HNSW index on `memory_store.memory_chunks.embedding`. `memory_store.memories` remains an optional parallel/admin table.
+Key indexes: `idx_raw_captures_user_created`, `idx_raw_captures_user_source_external_id` (partial, for dedup), `idx_capture_jobs_status_available_created`, and the HNSW index on `memory_store.memory_chunks.embedding`.
 
-**At scale (vector index):** For large volumes, latency and recall depend primarily on the `memory_store.memory_chunks` pgvector path owned by the runtime. The `memory_store.memories_template` HNSW index in `init.sql` applies only to the optional parallel/admin table, not the main runtime memory path.
+**At scale (vector index):** For large volumes, latency and recall depend on the `memory_store.memory_chunks` pgvector path owned by the runtime.
 
 ---
 
 
-## 7. How to get data in (export → ingest)
+## 8. How to get data in (export → ingest)
 
 ChatGPT, Claude, Antigravity, and most chat apps **do not give OpenBrain (or MCP) direct API access** to pull your conversations. So the flow is always: **get the data out of the source** → **send it into OpenBrain**. The “get out” step is manual or tool-assisted; the “send in” step can be MCP or a script.
 
@@ -165,7 +191,7 @@ Copy-paste into Telegram (`/remember` or a future “paste to ingest” flow) or
 
 ---
 
-## 8. Connectors (outside core)
+## 9. Connectors (outside core)
 
 Each channel is a small adapter that:
 
@@ -183,7 +209,7 @@ Connectors can live in the same repo under `connectors/` or in separate repos; t
 
 ---
 
-## 9. Deduplication (optional)
+## 10. Deduplication (optional)
 
 To avoid re-ingesting the same conversation or note:
 
@@ -193,7 +219,7 @@ To avoid re-ingesting the same conversation or note:
 
 ---
 
-## 10. Current implementation details
+## 11. Current implementation details
 
 - **Core**: `ingest(content, source, external_id=None)` writes to `raw_captures`, dedups atomically on `(user_id, source, external_id)`, and enqueues the background job.
 - **Wrappers**: `capture_thought` is the normal interactive path; the classifier decides whether each capture stays raw-only or gets extra enrichment.

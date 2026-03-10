@@ -56,7 +56,14 @@ class VectorMemoryRepository(Protocol):
     def upsert_chunks(self, chunks: list[MemoryChunk]) -> int:
         ...
 
-    def search(self, query_embedding: list[float], *, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
+    def search(
+        self,
+        query_embedding: list[float],
+        *,
+        user_id: str,
+        limit: int = 10,
+        ingest_modes: tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
         ...
 
 

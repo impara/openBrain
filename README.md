@@ -12,6 +12,22 @@ For **multi-source ingestion** (ChatGPT/Claude/Antigravity exports, PC/phone not
 
 ---
 
+## Architecture Philosophy
+
+OpenBrain keeps **semantic search and graph traversal in the same PostgreSQL instance** on purpose. The goal is to avoid the usual split-brain problems of a Postgres + Neo4j stack: duplicate identifiers, partial writes across two databases, stitched queries in application code, and double operational overhead.
+
+The project originally leaned on Mem0 for extraction and graph logic. It now keeps that intelligence inside OpenBrain itself. The reason is control: retrieval quality, provider choice, storage semantics, and search behavior all turned out to be core product concerns rather than vendor details.
+
+The design intent is:
+- `raw_captures` preserves the original source text
+- `memory_chunks` powers semantic recall over raw passages and extracted facts
+- Apache AGE adds entity and relationship traversal
+- the application owns the ingestion and ranking policy
+
+That gives the project one database, one runtime truth, and one place to evolve retrieval behavior.
+
+---
+
 ## Architecture
 
 ```
@@ -38,8 +54,6 @@ For **multi-source ingestion** (ChatGPT/Claude/Antigravity exports, PC/phone not
               │                 │
               │ pgvector → Chunks│
               │ AGE → Knowledge │
-              │ partman → Parts │
-              │ pg_cron → Auto  │
               └─────────────────┘
 ```
 
@@ -47,12 +61,10 @@ For **multi-source ingestion** (ChatGPT/Claude/Antigravity exports, PC/phone not
 |-----------|------|
 | **pgvector** | Runtime-owned HNSW vector search over `memory_store.memory_chunks` |
 | **Apache AGE** | Cypher-based knowledge graph for entity relationships |
-| **pg_partman** | Optional monthly partitioning for the example admin table `memory_store.memories` |
-| **pg_cron** | Maintenance for that optional partitioned admin table |
 | **OpenBrain runtime** | Chunking, embedding, fact extraction, ranking, and queue orchestration |
 | **MCP** | Tool protocol for agent integration via Streamable HTTP or stdio |
 
-Schema: main tables (`raw_captures`, `capture_jobs`) and key indexes are summarized in [ARCHITECTURE.md §6](ARCHITECTURE.md#6-schema-summary).
+Schema: main tables (`raw_captures`, `capture_jobs`) and key indexes are summarized in [ARCHITECTURE.md §7](ARCHITECTURE.md#7-schema-summary).
 
 ---
 
@@ -80,7 +92,7 @@ docker compose up -d
 ```
 
 This starts three containers:
-- `open_brain_postgres` — Custom Postgres 16 with AGE + pgvector + pg_partman + pg_cron
+- `open_brain_postgres` — Custom Postgres 16 with AGE + pgvector
 - `open_brain_mcp` — Python MCP server exposing the memory tools
 - `open_brain_telegram` — Telegram bot for chat-based memory access
 
@@ -93,11 +105,11 @@ docker compose ps
 # Verify database extensions
 docker compose exec open-brain-db psql -U brain_user -d open_brain \
   -c "SELECT extname FROM pg_extension;"
-# Expected: vector, pg_partman, pg_cron, age
+# Expected: vector, age
 
-# Verify optional admin-table partitions
+# Verify runtime tables
 docker compose exec open-brain-db psql -U brain_user -d open_brain \
-  -c "SELECT tablename FROM pg_tables WHERE schemaname = 'memory_store';"
+  -c "\dt memory_store.*"
 ```
 
 ---
@@ -157,7 +169,6 @@ All configuration is via environment variables (`.env` file):
 | `OPENBRAIN_OPENROUTER_SITE_URL` | No | — | Optional `HTTP-Referer` header for OpenRouter |
 | `OPENBRAIN_OPENROUTER_APP_NAME` | No | — | Optional `X-Title` header for OpenRouter |
 | `MCP_TRANSPORT` | No | `streamable-http` | MCP transport: `streamable-http` (default) or `stdio` for local IDE |
-| `MEMORY_RETENTION_MONTHS` | No | `12` | Retention window for the optional `memory_store.memories` admin table; `0` disables retention |
 | `OPENBRAIN_CAPTURE_MODE` | No | `async` | `async` queues `/remember` for background indexing, `sync` blocks until ingestion finishes |
 | `OPENBRAIN_INGEST_WORKERS` | No | `1` | Number of in-process capture workers per service |
 | `OPENBRAIN_INGEST_POLL_MS` | No | `250` | Poll interval for queued capture jobs |
@@ -271,7 +282,7 @@ openBrain/
 ├── open_brain_mcp.py     # MCP server wrapping brain_core tools
 ├── telegram_bot.py       # Telegram bot client (/remember, /search)
 ├── init.sql              # Database schema, partitioning, indexes, cron
-├── Dockerfile            # Custom Postgres 16 + AGE + pgvector + partman + cron
+├── Dockerfile            # Custom Postgres 16 + AGE + pgvector
 ├── Dockerfile.mcp        # Python container for the MCP server
 ├── Dockerfile.telegram   # Python container for the Telegram bot
 ├── docker-compose.yml    # Three-service orchestration (DB + MCP + Telegram)

@@ -40,7 +40,6 @@ def make_settings(llm_provider="openai", embedding_provider="openai"):
         capture_mode="async",
         ingest_workers=1,
         ingest_poll_ms=250,
-        memory_retention_months=12,
         graph_name="brain_graph_v2",
         log_level="INFO",
     )

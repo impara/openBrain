@@ -20,7 +20,7 @@ Confirm all required plugins are loaded and initialized:
 ```bash
 docker compose exec open-brain-db psql -U brain_user -d open_brain -c "SELECT extname, extversion FROM pg_extension;"
 ```
-*Expected: `age`, `vector`, `pg_partman`, `pg_cron` should be present.*
+*Expected: `age` and `vector` should be present.*
 
 ---
 
@@ -42,10 +42,10 @@ docker compose exec open-brain-mcp python -m pytest tests/ -v
 
 ## 3. Database Verification (Manual Audit)
 
-### Check Partitioning (pg_partman)
-Verify that the optional admin table `memory_store.memories` is partitioned by month:
+### Check Runtime Tables
+Verify that only the runtime-owned tables are present:
 ```bash
-docker compose exec open-brain-db psql -U brain_user -d open_brain -c "\d+ memory_store.memories"
+docker compose exec open-brain-db psql -U brain_user -d open_brain -c "\dt memory_store.*"
 ```
 
 ### Check HNSW Index Choice
@@ -112,34 +112,41 @@ docker compose down -v
 Use this when you want to re-test retrieval from a clean database without deleting Docker volumes.
 
 ```bash
+docker update --restart=no open_brain_mcp open_brain_telegram
 docker stop open_brain_mcp open_brain_telegram
 
 docker exec open_brain_postgres psql -U brain_user -d open_brain -v ON_ERROR_STOP=1 -c "
-TRUNCATE TABLE public.memories RESTART IDENTITY;
-TRUNCATE TABLE memory_store.memories RESTART IDENTITY CASCADE;
+TRUNCATE TABLE memory_store.raw_captures RESTART IDENTITY CASCADE;
 TRUNCATE TABLE memory_store.graph_dlq RESTART IDENTITY;
-TRUNCATE TABLE memory_store.raw_captures RESTART IDENTITY;
 DO \$\$
 DECLARE r RECORD;
 BEGIN
-  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname='brain_graph' LOOP
-    EXECUTE format('TRUNCATE TABLE brain_graph.%I RESTART IDENTITY CASCADE', r.tablename);
+  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname='brain_graph_v2' LOOP
+    EXECUTE format('TRUNCATE TABLE brain_graph_v2.%I RESTART IDENTITY CASCADE', r.tablename);
   END LOOP;
 END
 \$\$;
 "
 
 docker exec open_brain_postgres psql -U brain_user -d open_brain -c "
-SELECT 'public.memories' AS table_name, COUNT(*) AS rows FROM public.memories
-UNION ALL SELECT 'memory_store.memories', COUNT(*) FROM memory_store.memories
-UNION ALL SELECT 'memory_store.graph_dlq', COUNT(*) FROM memory_store.graph_dlq
-UNION ALL SELECT 'memory_store.raw_captures', COUNT(*) FROM memory_store.raw_captures;
+SELECT 'memory_store.raw_captures' AS table_name, COUNT(*) AS rows FROM memory_store.raw_captures
+UNION ALL SELECT 'memory_store.capture_jobs', COUNT(*) FROM memory_store.capture_jobs
+UNION ALL SELECT 'memory_store.memory_chunks', COUNT(*) FROM memory_store.memory_chunks
+UNION ALL SELECT 'memory_store.graph_dlq', COUNT(*) FROM memory_store.graph_dlq;
 "
 
- docker start open_brain_mcp open_brain_telegram
+docker update --restart=unless-stopped open_brain_mcp open_brain_telegram
+docker start open_brain_mcp open_brain_telegram
 
 
 ```
+
+Notes:
+- The runtime retrieval path uses `memory_store.raw_captures`, `memory_store.capture_jobs`, and `memory_store.memory_chunks`.
+- `TRUNCATE memory_store.raw_captures ... CASCADE` also clears `memory_store.capture_jobs` and `memory_store.memory_chunks`.
+- The active Apache AGE graph schema is `brain_graph_v2`, not `brain_graph`.
+
+If your local Postgres volume predates the current schema and reset/cleanup becomes noisy, use `docker compose down -v` for a full local reset.
 
 > [!IMPORTANT]
 > **Provider Capability Requirement**: The `capture_thought` tool needs both an embedding provider and a structured-generation provider. Ensure your configured provider/model pair supports the chosen role and that `OPENBRAIN_EMBEDDING_DIMS` matches the actual embedding output size.

@@ -36,6 +36,7 @@ _STOPWORDS = {
 }
 
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9@._:-]{1,}")
+_CITATION_RE = re.compile(r"\b\d{1,3}:\d{1,3}\b")
 _CLI_FLAG_RE = re.compile(r"(?:^|\s)--?[A-Za-z0-9][\w-]*")
 _ENV_ASSIGN_RE = re.compile(r"^[A-Z_][A-Z0-9_]*=", re.MULTILINE)
 _CODE_FENCE_RE = re.compile(r"```|~~~")
@@ -162,6 +163,49 @@ def chunk_text_sentences(text: str, max_chunk_chars: int = 900, max_chunks: int 
     if current and len(chunks) < max_chunks:
         chunks.append(current)
     return [chunk for chunk in chunks if chunk]
+
+
+def chunk_text_passages(text: str, max_chunk_chars: int = 420, max_chunks: int = 12) -> list[str]:
+    raw = (text or "").strip()
+    if not raw:
+        return []
+
+    blocks = [" ".join(block.split()) for block in re.split(r"\n{2,}", raw) if block.strip()]
+    if not blocks:
+        return chunk_text_sentences(raw, max_chunk_chars=max_chunk_chars, max_chunks=max_chunks)
+
+    chunks: list[str] = []
+    for block in blocks:
+        if len(chunks) >= max_chunks:
+            break
+        if len(block) <= max_chunk_chars:
+            chunks.append(block)
+            continue
+        for sentence_chunk in chunk_text_sentences(
+            block,
+            max_chunk_chars=max_chunk_chars,
+            max_chunks=max_chunks - len(chunks),
+        ):
+            chunks.append(sentence_chunk)
+            if len(chunks) >= max_chunks:
+                break
+
+    if not chunks:
+        return chunk_text_sentences(raw, max_chunk_chars=max_chunk_chars, max_chunks=max_chunks)
+
+    # Preserve citation-bearing blocks and drop only exact duplicates.
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        clean = " ".join(chunk.split())
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(clean)
+    return deduped[:max_chunks]
 
 
 def heuristic_bullets(chunk: str, max_bullets: int = 3) -> list[str]:

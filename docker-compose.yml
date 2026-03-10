@@ -13,7 +13,6 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - brain_data:/var/lib/postgresql/data
-    command: postgres -c shared_preload_libraries='age,pg_cron' -c cron.database_name='${POSTGRES_DB}' -c openbrain.memory_retention_months='${MEMORY_RETENTION_MONTHS:-12}'
     restart: unless-stopped
     networks:
       - brain_net

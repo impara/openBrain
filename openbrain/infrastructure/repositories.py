@@ -171,25 +171,6 @@ class OpenBrainRepositories:
                 """
             )
 
-            cur.execute("SELECT to_regclass('public.part_config');")
-            part_config_row = cur.fetchone()
-            if part_config_row and part_config_row[0]:
-                retention_value = (
-                    None
-                    if self.settings.memory_retention_months == 0
-                    else f"{self.settings.memory_retention_months} months"
-                )
-                cur.execute(
-                    """
-                    UPDATE public.part_config
-                    SET retention = %s,
-                        retention_keep_table = false,
-                        retention_keep_index = false
-                    WHERE parent_table = 'memory_store.memories';
-                    """,
-                    (retention_value,),
-                )
-
     def capture_and_enqueue(
         self,
         thought: str,
@@ -456,20 +437,39 @@ class OpenBrainRepositories:
                 )
         return len(chunks)
 
-    def search_vectors(self, query_embedding: list[float], *, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
+    def search_vectors(
+        self,
+        query_embedding: list[float],
+        *,
+        user_id: str,
+        limit: int = 10,
+        ingest_modes: tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
         vector = _vector_literal(query_embedding)
         with self.db.cursor() as (_, cur):
             cur.execute("SET LOCAL hnsw.ef_search = 100;")
-            cur.execute(
-                """
-                SELECT id, content, metadata, created_at, source, ingest_mode, embedding <=> %s::vector AS score
-                FROM memory_store.memory_chunks
-                WHERE user_id = %s
-                ORDER BY embedding <=> %s::vector
-                LIMIT %s;
-                """,
-                (vector, user_id, vector, limit),
-            )
+            if ingest_modes:
+                cur.execute(
+                    """
+                    SELECT id, content, metadata, created_at, source, ingest_mode, embedding <=> %s::vector AS score
+                    FROM memory_store.memory_chunks
+                    WHERE user_id = %s AND ingest_mode = ANY(%s)
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s;
+                    """,
+                    (vector, user_id, list(ingest_modes), vector, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id, content, metadata, created_at, source, ingest_mode, embedding <=> %s::vector AS score
+                    FROM memory_store.memory_chunks
+                    WHERE user_id = %s
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s;
+                    """,
+                    (vector, user_id, vector, limit),
+                )
             rows = cur.fetchall()
         return [
             {

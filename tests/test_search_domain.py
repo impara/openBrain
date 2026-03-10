@@ -1,4 +1,11 @@
-from openbrain.domain.search import build_candidates, synthesize_answer
+from openbrain.domain.search import (
+    SEARCH_INTENT_REFERENCE,
+    _best_matching_segment,
+    build_candidates,
+    detect_search_intent,
+    rank_evidence,
+    synthesize_answer,
+)
 from openbrain.domain.text import tokenize
 
 
@@ -50,3 +57,47 @@ def test_synthesize_answer_is_query_aware_for_quote_style_queries():
     answer = synthesize_answer("What does 28:88 say", evidence)
     assert "28:88 says" in answer
     assert "Everything is perishing except His Face" in answer
+    assert "49:13" not in answer
+
+
+def test_detect_search_intent_classifies_citation_queries_as_reference():
+    assert detect_search_intent("What does 28:88 say") == SEARCH_INTENT_REFERENCE
+
+
+def test_rank_evidence_drops_non_citation_items_for_reference_queries():
+    evidence = build_candidates(
+        "What does 28:88 say",
+        vector_results=[
+            {
+                "content": "Everything is perishing except His Face. (28:88)",
+                "score": 0.01,
+                "metadata": {"origin": "capture_thought", "ingest_mode": "raw"},
+            },
+            {
+                "content": "Indeed, We began creation and We will repeat it, so that you may return. (21:104)",
+                "score": 0.02,
+                "metadata": {"origin": "capture_thought", "ingest_mode": "raw"},
+            },
+        ],
+        relations=[],
+        raw_matches=[],
+    )
+    ranked, debug = rank_evidence("What does 28:88 say", evidence, intent=SEARCH_INTENT_REFERENCE)
+    assert len(ranked) == 1
+    assert "28:88" in ranked[0].text
+    assert any(item["reason"] == "missing_citation" for item in debug["dropped"])
+
+
+def test_best_matching_segment_does_not_merge_previous_verse_when_target_segment_is_complete():
+    text = (
+        "“We have made you into nations and tribes so that you may know one another.” (49:13)\n\n"
+        "“Everything is perishing except His Face.” (28:88)\n\n"
+        "Diversity is not to be worshipped, nor dismissed."
+    )
+    segment = _best_matching_segment(
+        text,
+        query_tokens=tokenize("What does 28:88 say"),
+        query_citations=["28:88"],
+    )
+    assert "Everything is perishing except His Face" in segment
+    assert "49:13" not in segment

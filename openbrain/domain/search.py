@@ -15,6 +15,8 @@ SOURCE_WEIGHT = {"vector": 1.0, "graph": 0.82, "raw": 0.68}
 MAX_DEBUG_CHARS = 3800
 MAX_SOURCE_TEXT = 180
 MAX_ANSWER_TEXT = 520
+SEARCH_INTENT_GENERAL = "general"
+SEARCH_INTENT_REFERENCE = "reference"
 _CITATION_RE = re.compile(r"\b\d{1,3}:\d{1,3}\b")
 _QUOTE_QUERY_RE = re.compile(r"\b(what does|what is|what says|say|quote|verse|ayah|surah|meaning)\b", re.IGNORECASE)
 
@@ -111,6 +113,12 @@ def _query_citations(query: str) -> list[str]:
     return [match.group(0).lower() for match in _CITATION_RE.finditer(query or "")]
 
 
+def detect_search_intent(query: str) -> str:
+    if _query_citations(query) or _QUOTE_QUERY_RE.search(query or ""):
+        return SEARCH_INTENT_REFERENCE
+    return SEARCH_INTENT_GENERAL
+
+
 def _split_segments(text: str) -> list[str]:
     raw = (text or "").strip()
     if not raw:
@@ -151,6 +159,21 @@ def _trim_cleanly(text: str, max_len: int) -> str:
     return f"{trimmed or clean[:max_len].rstrip()}..."
 
 
+def _segment_needs_context(segment: str, citations: list[str]) -> bool:
+    if not segment:
+        return True
+    lower = segment.lower()
+    citation_positions = [lower.find(citation.lower()) for citation in citations if citation.lower() in lower]
+    if citation_positions and min(citation_positions) <= 8:
+        return True
+    stripped = segment
+    for citation in citations:
+        stripped = re.sub(re.escape(citation), " ", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"[^\w\s]", " ", stripped, flags=re.UNICODE)
+    words = re.findall(r"\w+", stripped, flags=re.UNICODE)
+    return len(words) < 5
+
+
 def _best_matching_segment(
     text: str,
     *,
@@ -159,17 +182,33 @@ def _best_matching_segment(
     query_citations: list[str] | None = None,
 ) -> str:
     clean = " ".join((text or "").split())
-    if len(clean) <= max_len:
+    if not clean:
+        return ""
+
+    segments = _split_segments(text)
+    if len(clean) <= max_len and len(segments) <= 1:
         return clean
 
     citations = [citation.lower() for citation in (query_citations or [])]
     best_segment = ""
     best_score = -1.0
-    for segment in _split_segments(text):
+    for idx, segment in enumerate(segments):
         segment_lower = segment.lower()
         overlap = _query_overlap(query_tokens, segment)
         citation_bonus = 0.5 if citations and any(citation in segment_lower for citation in citations) else 0.0
         score = overlap + citation_bonus
+        if citation_bonus and idx > 0 and _segment_needs_context(segment, citations):
+            previous = segments[idx - 1]
+            previous_lower = previous.lower()
+            if citations and any(citation in segment_lower for citation in citations) and not any(
+                citation in previous_lower for citation in citations
+            ):
+                merged = f"{previous} {segment}".strip()
+                merged_overlap = _query_overlap(query_tokens, merged)
+                merged_score = merged_overlap + 0.5
+                if merged_score >= score:
+                    segment = merged
+                    score = merged_score
         if score > best_score:
             best_score = score
             best_segment = segment
@@ -322,8 +361,10 @@ def rank_evidence(
     candidates: list[EvidenceItem],
     limit: int = MAX_EVIDENCE,
     threshold: float = SCORE_THRESHOLD,
+    intent: str = SEARCH_INTENT_GENERAL,
 ) -> tuple[list[EvidenceItem], dict[str, Any]]:
     query_tokens = tokenize(query)
+    query_citations = _query_citations(query)
     selected: list[EvidenceItem] = []
     dropped: list[dict[str, Any]] = []
     debug_candidates: list[dict[str, Any]] = []
@@ -338,6 +379,9 @@ def rank_evidence(
 
         norm = normalized_text(text)
         components = _score_candidate(item, query_tokens=query_tokens)
+        has_citation = bool(query_citations) and any(citation in text.lower() for citation in query_citations)
+        if has_citation:
+            components["final"] = max(0.0, min(1.0, components["final"] + 0.2))
         debug_candidates.append(
             {
                 "source": item.source,
@@ -346,8 +390,21 @@ def rank_evidence(
                 "overlap": round(components["overlap"], 4),
                 "vector_similarity": round(components["vector_similarity"], 4),
                 "recency_bonus": round(components["recency_bonus"], 4),
+                "has_citation": has_citation,
+                "ingest_mode": item.metadata.get("ingest_mode"),
             }
         )
+
+        if intent == SEARCH_INTENT_REFERENCE and query_citations and not has_citation:
+            dropped.append(
+                {
+                    "source": item.source,
+                    "text": text,
+                    "reason": "missing_citation",
+                    "score": round(components["final"], 4),
+                }
+            )
+            continue
 
         if components["overlap"] < 0.05 and components["vector_similarity"] < 0.72:
             dropped.append(
@@ -445,7 +502,7 @@ def synthesize_answer(query: str, evidence: list[EvidenceItem]) -> str:
 
     query_tokens = tokenize(query)
     query_citations = _query_citations(query)
-    quote_like_query = bool(query_citations) or bool(_QUOTE_QUERY_RE.search(query or ""))
+    quote_like_query = detect_search_intent(query) == SEARCH_INTENT_REFERENCE
 
     if quote_like_query:
         best_quote = ""

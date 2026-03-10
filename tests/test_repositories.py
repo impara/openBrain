@@ -38,7 +38,6 @@ def make_settings(dims=1536):
         capture_mode="async",
         ingest_workers=1,
         ingest_poll_ms=250,
-        memory_retention_months=12,
         graph_name="brain_graph_v2",
         log_level="INFO",
     )
@@ -119,3 +118,22 @@ def test_search_vectors_returns_runtime_chunk_shape():
     assert result[0]["content"] == "dark mode"
     assert result[0]["score"] == 0.04
     assert result[0]["ingest_mode"] == "fact"
+
+
+def test_search_vectors_can_filter_ingest_modes():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = []
+
+    @contextmanager
+    def fake_cursor(*, commit=False):
+        del commit
+        yield None, cursor
+
+    db = MagicMock()
+    db.cursor = fake_cursor
+    repo = OpenBrainRepositories(db, make_settings())
+    repo.search_vectors([0.1, 0.2], user_id="default", limit=5, ingest_modes=("raw",))
+    sql = cursor.execute.call_args_list[1].args[0]
+    params = cursor.execute.call_args_list[1].args[1]
+    assert "ingest_mode = ANY(%s)" in sql
+    assert params[2] == ["raw"]

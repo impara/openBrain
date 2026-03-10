@@ -47,7 +47,6 @@ class OpenBrainSettings:
     capture_mode: str
     ingest_workers: int
     ingest_poll_ms: int
-    memory_retention_months: int
     graph_name: str
     log_level: str
 
@@ -136,7 +135,6 @@ class OpenBrainSettings:
             capture_mode=capture_mode,
             ingest_workers=_env_int("OPENBRAIN_INGEST_WORKERS", 1),
             ingest_poll_ms=_env_int("OPENBRAIN_INGEST_POLL_MS", 250, minimum=50),
-            memory_retention_months=_env_int("MEMORY_RETENTION_MONTHS", 12, minimum=0),
             graph_name=(os.environ.get("OPENBRAIN_GRAPH_NAME") or "brain_graph_v2").strip(),
             log_level=os.environ.get("LOG_LEVEL", "INFO"),
         )

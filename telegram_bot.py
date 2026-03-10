@@ -34,6 +34,22 @@ AUTO_CAPTURE = os.environ.get("TELEGRAM_AUTO_CAPTURE", "false").lower() == "true
 
 # ── Command Handlers ──────────────────────────
 
+
+def _command_payload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    message = getattr(update, "message", None)
+    raw_text = getattr(message, "text", "") or ""
+    entities = getattr(message, "entities", None) or []
+
+    if raw_text.startswith("/"):
+        for entity in entities:
+            if getattr(entity, "type", None) == "bot_command" and getattr(entity, "offset", None) == 0:
+                return raw_text[getattr(entity, "length", 0) :].lstrip()
+        parts = raw_text.split(maxsplit=1)
+        return parts[1] if len(parts) > 1 else ""
+
+    return " ".join(context.args) if context.args else ""
+
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start — welcome message."""
     del context
@@ -67,7 +83,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def remember_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /remember <text> — capture text with automatic enrichment selection."""
-    text = " ".join(context.args) if context.args else ""
+    text = _command_payload(update, context)
     if not text:
         await update.message.reply_text(
             "⚠️ Please provide a thought to remember.\n"
@@ -88,7 +104,7 @@ async def remember_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /search <query> — search the brain."""
-    query = " ".join(context.args) if context.args else ""
+    query = _command_payload(update, context)
     if not query:
         await update.message.reply_text(
             "⚠️ Please provide a search query.\n"
@@ -109,7 +125,7 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def search_debug_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /search_debug <query> — search with full trace."""
-    query = " ".join(context.args) if context.args else ""
+    query = _command_payload(update, context)
     if not query:
         await update.message.reply_text(
             "⚠️ Please provide a search query.\n"

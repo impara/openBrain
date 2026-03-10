@@ -125,6 +125,22 @@ class TestRememberHandler:
             await remember_handler(mock_update, mock_context)
         mock_to_thread.assert_awaited_once_with(remember_handler.__globals__["capture_thought"], "slow capture")
 
+    @pytest.mark.asyncio
+    async def test_preserves_multiline_payload_from_original_message(self, mock_update, mock_context):
+        mock_update.message.text = "/remember Manifesto line 1\n\nManifesto line 2"
+        command_entity = MagicMock()
+        command_entity.type = "bot_command"
+        command_entity.offset = 0
+        command_entity.length = len("/remember")
+        mock_update.message.entities = [command_entity]
+        mock_context.args = ["Manifesto", "line", "1", "Manifesto", "line", "2"]
+        with patch("telegram_bot.asyncio.to_thread", new=AsyncMock(return_value="queued")) as mock_to_thread:
+            await remember_handler(mock_update, mock_context)
+        mock_to_thread.assert_awaited_once_with(
+            remember_handler.__globals__["capture_thought"],
+            "Manifesto line 1\n\nManifesto line 2",
+        )
+
 
 class TestSearchHandler:
     """Test /search command."""

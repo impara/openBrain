@@ -4,12 +4,10 @@ FROM apache/age:release_PG16_1.6.0
 # Switch to root to install dependencies and compile extensions
 USER root
 
-# Install build tools, partman, and cron
+# Install build tools needed to compile pgvector
 RUN apt-get update && apt-get install -y \
     build-essential \
     postgresql-server-dev-16=16.13-1.pgdg13+1 \
-    postgresql-16-partman=5.4.2-1.pgdg13+1 \
-    postgresql-16-cron=1.6.7-2.pgdg13+1 \
     git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -19,12 +17,6 @@ RUN git clone --branch v0.6.0 https://github.com/pgvector/pgvector.git /tmp/pgve
     && make \
     && make install \
     && rm -rf /tmp/pgvector
-
-# Extend shared_preload_libraries to include pg_cron alongside AGE (from base image)
-RUN sed -i "s/^shared_preload_libraries = '\(.*\)'/shared_preload_libraries = '\1,pg_cron'/" \
-    /usr/share/postgresql/16/postgresql.conf.sample || \
-    echo "shared_preload_libraries = 'age,pg_cron'" >> /usr/share/postgresql/16/postgresql.conf.sample \
-    && echo "cron.database_name = 'open_brain'" >> /usr/share/postgresql/16/postgresql.conf.sample
 
 # Ship initialization SQL in the image so deployments do not depend on a host bind mount.
 COPY init.sql /docker-entrypoint-initdb.d/init.sql
