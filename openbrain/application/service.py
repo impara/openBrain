@@ -4,12 +4,15 @@ import logging
 import threading
 import time
 
-from openbrain.domain.models import CaptureJob, MemoryChunk
+from openbrain.domain.models import CaptureJob, ManagedMemoryRecord, MemoryChunk
 from openbrain.domain.ports import (
     BulletExtractor,
     EmbeddingProvider,
     GraphExtractor,
     GraphRepository,
+    ManagedMemoryExtractor,
+    ManagedMemoryRepository,
+    ManagedMemoryResolver,
 )
 from openbrain.domain.search import (
     build_candidates,
@@ -22,6 +25,7 @@ from openbrain.domain.text import (
     chunk_text_passages,
     detect_auto_ingest_strategy,
     normalized_text,
+    topic_key,
 )
 from openbrain.infrastructure.repositories import OpenBrainRepositories
 from openbrain.settings import OpenBrainSettings
@@ -32,6 +36,7 @@ _CAPTURE_ACK_TEXT = "Thought captured and queued for indexing."
 _PERSIST_ERROR_HINT = " Check provider configuration and database connectivity."
 _CAPTURE_RETRY_BACKOFF_SECONDS = (60, 300, 900)
 _SINGLE_USER_ID = "default"
+_MANAGED_KINDS = {"directive", "preference"}
 
 
 class OpenBrainApplication:
@@ -42,17 +47,23 @@ class OpenBrainApplication:
         repositories: OpenBrainRepositories,
         vector_repo: OpenBrainRepositories,
         graph_repo: GraphRepository,
+        managed_repo: ManagedMemoryRepository,
         embedding_provider: EmbeddingProvider,
         bullet_extractor: BulletExtractor,
         graph_extractor: GraphExtractor,
+        managed_extractor: ManagedMemoryExtractor,
+        managed_resolver: ManagedMemoryResolver,
     ):
         self.settings = settings
         self.repositories = repositories
         self.vector_repo = vector_repo
         self.graph_repo = graph_repo
+        self.managed_repo = managed_repo
         self.embedding_provider = embedding_provider
         self.bullet_extractor = bullet_extractor
         self.graph_extractor = graph_extractor
+        self.managed_extractor = managed_extractor
+        self.managed_resolver = managed_resolver
         self._worker_lock = threading.Lock()
         self._worker_threads: list[threading.Thread] = []
         self._worker_stop_event = threading.Event()
@@ -74,6 +85,7 @@ class OpenBrainApplication:
                 source="capture_thought",
                 ingest_strategy=detect_auto_ingest_strategy(thought, source="capture_thought"),
                 external_id=None,
+                managed_kind_override=None,
             )
             queue_stats = self.get_capture_job_stats()
             accept_ms = (time.perf_counter() - started_at) * 1000
@@ -98,10 +110,20 @@ class OpenBrainApplication:
             return "Warning: Failed to fully commit memory during synchronous processing."
         return _CAPTURE_ACK_TEXT
 
-    def ingest(self, content: str, *, source: str = "import", external_id: str | None = None) -> str:
+    def ingest(
+        self,
+        content: str,
+        *,
+        source: str = "import",
+        external_id: str | None = None,
+        managed_kind: str | None = None,
+    ) -> str:
         content = (content or "").strip()
         if not content:
             return "Warning: Please provide non-empty content."
+        managed_kind = self._normalize_managed_kind(managed_kind)
+        if managed_kind is False:
+            return "Warning: managed_kind must be 'directive' or 'preference'."
 
         logger.info("Ingest source=%s len=%d", source, len(content))
         started_at = time.perf_counter()
@@ -112,6 +134,7 @@ class OpenBrainApplication:
                 source=source,
                 ingest_strategy=detect_auto_ingest_strategy(content, source=source),
                 external_id=external_id,
+                managed_kind_override=managed_kind or None,
             )
             if persist_result.duplicate:
                 logger.info(
@@ -150,6 +173,15 @@ class OpenBrainApplication:
 
         intent = detect_search_intent(query)
         query_embedding = self.embedding_provider.embed(query)
+        managed_results = (
+            []
+            if intent == "reference"
+            else self.managed_repo.search_managed_memories(
+                query_embedding,
+                user_id=self.brain_user_id(),
+                limit=6,
+            )
+        )
         vector_results = self.vector_repo.search_vectors(
             query_embedding,
             user_id=self.brain_user_id(),
@@ -162,11 +194,88 @@ class OpenBrainApplication:
             limit=12 if intent == "reference" else 8,
         )
         relations = {"nodes": [], "edges": []} if intent == "reference" else self.graph_repo.search(query, limit=5)
-        candidates = build_candidates(query, vector_results, relations, raw_matches)
+        candidates = build_candidates(query, vector_results, relations, raw_matches, managed_results=managed_results)
         evidence, ranking_debug = rank_evidence(query, candidates, intent=intent)
         if debug:
             return format_debug_report(query, ranking_debug, evidence)
         return format_search_response(query, evidence)
+
+    def get_active_memories(self, *, query: str = "", kind: str | None = None) -> str:
+        kind = self._normalize_managed_kind(kind)
+        if kind is False:
+            return "Warning: kind must be 'directive' or 'preference'."
+
+        if (query or "").strip():
+            matches = self.managed_repo.search_managed_memories(
+                self.embedding_provider.embed(query),
+                user_id=self.brain_user_id(),
+                limit=10,
+                kind=kind or None,
+            )
+            if not matches:
+                return "No active managed memories matched that query."
+            grouped: dict[str, list[str]] = {"directive": [], "preference": []}
+            for match in matches:
+                grouped.setdefault(match.kind, []).append(match.canonical_text)
+            return self._format_managed_memory_groups(grouped, title="Managed memory matches")
+
+        records = self.managed_repo.list_active_managed_memories(
+            user_id=self.brain_user_id(),
+            kind=kind or None,
+            limit=50,
+        )
+        if not records:
+            return "No active managed memories stored yet."
+        grouped: dict[str, list[str]] = {"directive": [], "preference": []}
+        for record in records:
+            grouped.setdefault(record.kind, []).append(record.canonical_text)
+        return self._format_managed_memory_groups(grouped, title="Active managed memories")
+
+    def rebuild_managed_memories(self, *, reset: bool = False) -> str:
+        if reset:
+            self.managed_repo.clear_managed_memories(user_id=self.brain_user_id())
+        captures = self.repositories.list_for_backfill(user_id=self.brain_user_id())
+        considered = 0
+        managed_updates = 0
+        for capture in captures:
+            if capture.ingest_strategy == "snippet" and not capture.managed_kind_override:
+                continue
+            considered += 1
+            managed_updates += self._upsert_managed_memories(
+                capture.content,
+                raw_capture_id=capture.id,
+                source=capture.source,
+                forced_kind=capture.managed_kind_override,
+            )
+        return (
+            f"Rebuilt managed memories from {considered} captures. "
+            f"Managed updates applied: {managed_updates}."
+        )
+
+    @staticmethod
+    def _normalize_managed_kind(kind: str | None) -> str | bool | None:
+        if kind is None:
+            return None
+        value = (kind or "").strip().lower()
+        if not value:
+            return None
+        if value not in _MANAGED_KINDS:
+            return False
+        return value
+
+    @staticmethod
+    def _format_managed_memory_groups(grouped: dict[str, list[str]], *, title: str) -> str:
+        lines = [title]
+        for kind in ("directive", "preference"):
+            items = grouped.get(kind) or []
+            if not items:
+                continue
+            label = "Active directives" if kind == "directive" else "Active preferences"
+            lines.append("")
+            lines.append(f"{label}:")
+            for item in items:
+                lines.append(f"- {item}")
+        return "\n".join(lines)
 
     def _build_memory_chunks(self, thought: str, *, raw_capture_id: int, source: str, ingest_mode: str) -> list[MemoryChunk]:
         chunks = chunk_text_passages(thought, max_chunk_chars=420, max_chunks=12)
@@ -234,6 +343,98 @@ class OpenBrainApplication:
             )
         return results
 
+    def _upsert_managed_memories(
+        self,
+        thought: str,
+        *,
+        raw_capture_id: int,
+        source: str,
+        forced_kind: str | None,
+    ) -> int:
+        candidates = self.managed_extractor.extract(thought, forced_kind=forced_kind)
+        applied = 0
+        for candidate in candidates:
+            key = topic_key(candidate.topic) or topic_key(candidate.canonical_text)
+            if not key:
+                continue
+            existing = self.managed_repo.find_active_by_topic(
+                user_id=self.brain_user_id(),
+                kind=candidate.kind,
+                topic_key=key,
+            )
+            metadata = {
+                "origin": source,
+                "raw_capture_id": raw_capture_id,
+                "kind": candidate.kind,
+                "topic": candidate.topic,
+                "topic_key": key,
+                "representation": "managed",
+            }
+            if candidate.evidence_text:
+                metadata["evidence_text"] = candidate.evidence_text
+            if forced_kind:
+                metadata["forced_kind"] = forced_kind
+
+            resolution = self.managed_resolver.resolve(candidate=candidate, existing=existing)
+            canonical_text = resolution.canonical_text or candidate.canonical_text
+            embedding = self.embedding_provider.embed(canonical_text)
+
+            if not existing:
+                self.managed_repo.insert_managed_memory(
+                    user_id=self.brain_user_id(),
+                    kind=candidate.kind,
+                    topic=candidate.topic,
+                    topic_key=key,
+                    canonical_text=canonical_text,
+                    embedding=embedding,
+                    embedding_provider=self.embedding_provider.provider_name,
+                    embedding_model=self.embedding_provider.model_name,
+                    embedding_dims=self.embedding_provider.embedding_dims,
+                    metadata=metadata,
+                    raw_capture_ids=[raw_capture_id],
+                )
+                applied += 1
+                continue
+
+            if resolution.action == "merge":
+                self.managed_repo.update_managed_memory(
+                    managed_memory_id=existing[0].id,
+                    canonical_text=canonical_text,
+                    embedding=embedding,
+                    embedding_provider=self.embedding_provider.provider_name,
+                    embedding_model=self.embedding_provider.model_name,
+                    embedding_dims=self.embedding_provider.embedding_dims,
+                    metadata={**existing[0].metadata, **metadata},
+                    raw_capture_ids=[raw_capture_id],
+                )
+                applied += 1
+                continue
+
+            existing_ids = [record.id for record in existing]
+            self.managed_repo.supersede_managed_memories(
+                managed_memory_ids=existing_ids,
+                superseded_by=None,
+            )
+            new_id = self.managed_repo.insert_managed_memory(
+                user_id=self.brain_user_id(),
+                kind=candidate.kind,
+                topic=candidate.topic,
+                topic_key=key,
+                canonical_text=canonical_text,
+                embedding=embedding,
+                embedding_provider=self.embedding_provider.provider_name,
+                embedding_model=self.embedding_provider.model_name,
+                embedding_dims=self.embedding_provider.embedding_dims,
+                metadata=metadata,
+                raw_capture_ids=[raw_capture_id],
+            )
+            self.managed_repo.supersede_managed_memories(
+                managed_memory_ids=existing_ids,
+                superseded_by=new_id,
+            )
+            applied += 1
+        return applied
+
     def _write_graph(self, thought: str, *, source: str) -> None:
         extraction = self.graph_extractor.extract(thought, user_id=self.brain_user_id())
         if extraction.nodes:
@@ -268,10 +469,11 @@ class OpenBrainApplication:
         raw_capture_id: int | None,
         source: str,
         ingest_strategy: str,
-    ) -> tuple[int, int]:
+        managed_kind_override: str | None = None,
+    ) -> tuple[int, int, int]:
         del user_id
         if raw_capture_id is None:
-            return 0, 0
+            return 0, 0, 0
         raw_chunks = self._build_memory_chunks(
             thought,
             raw_capture_id=raw_capture_id,
@@ -279,36 +481,48 @@ class OpenBrainApplication:
             ingest_mode="raw",
         )
         raw_added = self.vector_repo.upsert_chunks(raw_chunks)
-        if ingest_strategy == "snippet":
-            return raw_added, 0
+        fact_added = 0
+        managed_added = 0
 
-        fact_chunks = self._build_fact_chunks(thought, raw_capture_id=raw_capture_id, source=source)
-        fact_added = self.vector_repo.upsert_chunks(fact_chunks)
-        try:
-            self._write_graph(thought, source=source)
-        except Exception as exc:
-            logger.warning("Graph write failed for raw_capture_id=%s: %s", raw_capture_id, exc)
-        return raw_added + fact_added, fact_added
+        if ingest_strategy != "snippet":
+            fact_chunks = self._build_fact_chunks(thought, raw_capture_id=raw_capture_id, source=source)
+            fact_added = self.vector_repo.upsert_chunks(fact_chunks)
+            try:
+                self._write_graph(thought, source=source)
+            except Exception as exc:
+                logger.warning("Graph write failed for raw_capture_id=%s: %s", raw_capture_id, exc)
+
+        if ingest_strategy != "snippet" or managed_kind_override:
+            managed_added = self._upsert_managed_memories(
+                thought,
+                raw_capture_id=raw_capture_id,
+                source=source,
+                forced_kind=managed_kind_override,
+            )
+
+        return raw_added + fact_added + managed_added, fact_added, managed_added
 
     def _process_capture_job(self, job: CaptureJob) -> bool:
         started_at = time.perf_counter()
         try:
-            added_count, fact_added = self.ingest_capture(
+            added_count, fact_added, managed_added = self.ingest_capture(
                 thought=job.thought,
                 user_id=job.user_id,
                 raw_capture_id=job.raw_capture_id,
                 source=job.source,
                 ingest_strategy=job.ingest_strategy,
+                managed_kind_override=job.managed_kind_override,
             )
             duration_ms = (time.perf_counter() - started_at) * 1000
             self.repositories.mark_done(job)
             logger.info(
-                "Capture job done job_id=%s raw_capture_id=%s attempt=%d added=%d fact_added=%d ingest_ms=%.1f",
+                "Capture job done job_id=%s raw_capture_id=%s attempt=%d added=%d fact_added=%d managed_added=%d ingest_ms=%.1f",
                 job.id,
                 job.raw_capture_id,
                 job.attempt_count,
                 added_count,
                 fact_added,
+                managed_added,
                 duration_ms,
             )
             return True

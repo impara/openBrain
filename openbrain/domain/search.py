@@ -11,7 +11,7 @@ from .text import normalized_text, tokenize
 
 MAX_EVIDENCE = 5
 SCORE_THRESHOLD = 0.52
-SOURCE_WEIGHT = {"vector": 1.0, "graph": 0.82, "raw": 0.68}
+SOURCE_WEIGHT = {"managed": 1.08, "vector": 1.0, "graph": 0.82, "raw": 0.68}
 MAX_DEBUG_CHARS = 3800
 MAX_SOURCE_TEXT = 180
 MAX_ANSWER_TEXT = 520
@@ -269,10 +269,44 @@ def build_candidates(
     vector_results: list[Any],
     relations: Any,
     raw_matches: list[RawCaptureMatch],
+    managed_results: list[Any] | None = None,
 ) -> list[EvidenceItem]:
     query_tokens = tokenize(query)
     query_citations = _query_citations(query)
     candidates: list[EvidenceItem] = []
+
+    for row in managed_results or []:
+        if isinstance(row, Mapping):
+            text = str(row.get("canonical_text") or row.get("text") or "").strip()
+            metadata = {
+                "id": row.get("id"),
+                "created_at": row.get("created_at"),
+                "updated_at": row.get("updated_at"),
+                "managed_kind": row.get("kind"),
+                "topic": row.get("topic"),
+                "topic_key": row.get("topic_key"),
+            }
+            score_raw = _safe_float(row.get("score"), default=1.0)
+        else:
+            text = str(getattr(row, "canonical_text", "")).strip()
+            metadata = {
+                "id": getattr(row, "id", None),
+                "created_at": getattr(row, "created_at", None),
+                "updated_at": getattr(row, "updated_at", None),
+                "managed_kind": getattr(row, "kind", None),
+                "topic": getattr(row, "topic", None),
+                "topic_key": getattr(row, "topic_key", None),
+            }
+            score_raw = _safe_float(getattr(row, "score", None), default=1.0)
+        if text:
+            candidates.append(
+                EvidenceItem(
+                    source="managed",
+                    text=text,
+                    score_raw=score_raw,
+                    metadata=metadata,
+                )
+            )
 
     for row in vector_results:
         if isinstance(row, dict):
@@ -340,9 +374,9 @@ def _score_candidate(item: EvidenceItem, query_tokens: list[str]) -> dict[str, f
     recency = _recency_bonus(item.metadata.get("created_at"))
 
     vector_sim = 0.0
-    if item.source == "vector":
+    if item.source in {"vector", "managed"}:
         vector_sim = _vector_similarity(item.score_raw)
-        score = (0.55 * vector_sim) + (0.30 * overlap) + (0.15 * source_weight) + recency
+        score = (0.48 * vector_sim) + (0.32 * overlap) + (0.20 * source_weight) + recency
     else:
         score = (0.65 * overlap) + (0.35 * source_weight) + recency
 
@@ -535,15 +569,29 @@ def synthesize_answer(query: str, evidence: list[EvidenceItem]) -> str:
                 max_len=MAX_ANSWER_TEXT,
             )
 
+    managed_items = [item for item in evidence if item.source == "managed"]
+    if managed_items:
+        if len(managed_items) == 1:
+            kind = managed_items[0].metadata.get("managed_kind") or "memory"
+            return _truncate_text(
+                f"Based on your active {kind}: {managed_items[0].text.rstrip('.')}.",
+                max_len=MAX_ANSWER_TEXT,
+            )
+        joined = "; ".join(_truncate_text(item.text.rstrip(".") + ".", max_len=180).rstrip(".") for item in managed_items[:2])
+        return _truncate_text(
+            f"Based on your active managed memories: {joined}.",
+            max_len=MAX_ANSWER_TEXT,
+        )
+
     statements: list[str] = []
-    source_counts = {"vector": 0, "graph": 0, "raw": 0}
-    source_limits = {"vector": 2, "graph": 2, "raw": 1}
+    source_counts = {"managed": 0, "vector": 0, "graph": 0, "raw": 0}
+    source_limits = {"managed": 2, "vector": 2, "graph": 2, "raw": 1}
     seen_norm: set[str] = set()
 
     for item in evidence:
         if source_counts.get(item.source, 0) >= source_limits.get(item.source, 1):
             continue
-        if item.source == "raw" and source_counts.get("vector", 0) > 0:
+        if item.source == "raw" and (source_counts.get("managed", 0) > 0 or source_counts.get("vector", 0) > 0):
             continue
 
         text = _relation_to_sentence(item.text)
@@ -589,8 +637,12 @@ def format_sources(evidence: list[EvidenceItem]) -> list[str]:
         if source_counts.get(item.source, 0) >= source_limits.get(item.source, 1):
             continue
         text = _truncate_text(item.text, max_len=MAX_SOURCE_TEXT)
-        origin = item.metadata.get("origin") if item.metadata else None
-        label = f"{item.source} • {origin}" if origin else item.source
+        if item.source == "managed":
+            managed_kind = item.metadata.get("managed_kind") if item.metadata else None
+            label = f"managed • {managed_kind}" if managed_kind else "managed"
+        else:
+            origin = item.metadata.get("origin") if item.metadata else None
+            label = f"{item.source} • {origin}" if origin else item.source
         lines.append(f"• [{label}] {text}")
         source_counts[item.source] = source_counts.get(item.source, 0) + 1
         if len(lines) >= MAX_EVIDENCE:

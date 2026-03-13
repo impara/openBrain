@@ -25,6 +25,7 @@ The result is a simpler mental model:
 
 - `raw_captures` is the source of truth
 - `memory_chunks` is the runtime retrieval index for raw passages and extracted facts
+- `managed_memories` is the canonical layer for active directives and preferences
 - Apache AGE is the relational index for entities and edges
 - the OpenBrain application owns ingestion, enrichment, and ranking policy
 
@@ -35,6 +36,7 @@ This keeps one unified database strategy without outsourcing the actual memory b
 ## 2. Design principles
 
 - **One memory store**: All sources write into the same OpenBrain-owned vector + graph + `raw_captures` pipeline. Search is global across sources; you can still filter or label by source when needed.
+- **Managed memory for active instructions**: Durable directives and preferences are promoted into canonical managed records so retrieval can return one coherent instruction instead of only fragments.
 - **Source as first-class field**: Every ingested item has a `source` (e.g. `chatgpt`, `notes_phone`). It is stored in `raw_captures.source`, copied into `memory_chunks.source` and chunk metadata `origin`, and **shown in search results** so you can see where each memory came from.
 - **Single ingest pipeline**: One code path writes to `raw_captures` and enqueues a job; workers run the same ingestion logic with an automatic default that can still be explicitly forced to enriched or raw-only modes.
 - **Provider-agnostic runtime**: Extraction and embeddings are selected deployment-wide through adapters for OpenAI, OpenRouter, or Ollama.
@@ -61,14 +63,14 @@ This keeps one unified database strategy without outsourcing the actual memory b
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  EXISTING WORKERS                                                         │
-│  Poll capture_jobs → chunk → embed → store → extract facts/graph         │
+│  Poll capture_jobs → chunk → embed → store → extract managed/facts/graph │
 │  → OpenBrain-owned runtime pipeline                                      │
 └───────────────────────────────┬─────────────────────────────────────────┘
                                  │
                                  ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  UNIFIED MEMORY                                                           │
-│  memory_chunks + AGE graph + raw_captures                                │
+│  managed_memories + memory_chunks + AGE graph + raw_captures             │
 │  search_brain(query) searches everything                                 │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -144,8 +146,9 @@ Main application tables:
 | `memory_store.raw_captures` | Verbatim ingested content; columns include the internal fixed brain id (`user_id='default'`), `source`, `content`, `content_len`, `ingest_strategy`, `external_id`, `created_at`. |
 | `memory_store.capture_jobs` | Queue for async ingestion; links to `raw_captures`, has `status`, `attempt_count`, `available_at`, `last_error`. |
 | `memory_store.memory_chunks` | Runtime vector storage for raw chunks and extracted facts; owned by OpenBrain and created at bootstrap using the configured embedding dimensions. |
+| `memory_store.managed_memories` | Canonical active directives and preferences with supersession and semantic retrieval. |
 
-Key indexes: `idx_raw_captures_user_created`, `idx_raw_captures_user_source_external_id` (partial, for dedup), `idx_capture_jobs_status_available_created`, and the HNSW index on `memory_store.memory_chunks.embedding`.
+Key indexes: `idx_raw_captures_user_created`, `idx_raw_captures_user_source_external_id` (partial, for dedup), `idx_capture_jobs_status_available_created`, and the HNSW indexes on `memory_store.memory_chunks.embedding` and `memory_store.managed_memories.embedding`.
 
 **At scale (vector index):** For large volumes, latency and recall depend on the `memory_store.memory_chunks` pgvector path owned by the runtime.
 

@@ -7,7 +7,12 @@ from dotenv import load_dotenv
 
 from openbrain.application.service import OpenBrainApplication
 from openbrain.infrastructure.db import Database
-from openbrain.infrastructure.extraction import LLMBulletExtractor, LLMGraphExtractor
+from openbrain.infrastructure.extraction import (
+    LLMBulletExtractor,
+    LLMGraphExtractor,
+    LLMManagedMemoryExtractor,
+    LLMManagedMemoryResolver,
+)
 from openbrain.infrastructure.providers import build_embedding_provider, build_structured_generation_provider
 from openbrain.infrastructure.repositories import AGEGraphRepository, OpenBrainRepositories
 from openbrain.settings import OpenBrainSettings
@@ -36,9 +41,12 @@ def build_openbrain(settings: OpenBrainSettings | None = None) -> OpenBrainAppli
         repositories=repositories,
         vector_repo=repositories,
         graph_repo=graph_repo,
+        managed_repo=repositories,
         embedding_provider=embedding_provider,
         bullet_extractor=LLMBulletExtractor(llm_provider),
         graph_extractor=LLMGraphExtractor(llm_provider),
+        managed_extractor=LLMManagedMemoryExtractor(llm_provider),
+        managed_resolver=LLMManagedMemoryResolver(llm_provider),
     )
     logging.getLogger("open_brain").info(
         "OpenBrain initialized — provider-agnostic runtime ready (llm=%s/%s, embedding=%s/%s, capture_mode=%s, ingest_workers=%d)",

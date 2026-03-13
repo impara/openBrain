@@ -15,6 +15,9 @@ brain_core_mock = MagicMock()
 brain_core_mock.capture_thought = MagicMock(
     return_value="Thought captured and queued for indexing."
 )
+brain_core_mock.get_active_memories = MagicMock(
+    return_value="Active directives:\n- Act as an intellectual sparring partner"
+)
 brain_core_mock.search_brain = MagicMock(
     return_value="=== Retrieved Brain Context ===\n- Test memory\n"
 )
@@ -27,6 +30,7 @@ with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token", "POSTGRES_PAS
         start_handler,
         help_handler,
         remember_handler,
+        profile_handler,
         search_handler,
         search_debug_handler,
         text_handler,
@@ -68,6 +72,7 @@ class TestStartHandler:
         assert "/snippet" not in text
         assert "/search" in text
         assert "/search_debug" in text
+        assert "/profile" in text
 
 
 class TestHelpHandler:
@@ -82,6 +87,7 @@ class TestHelpHandler:
         assert "/snippet" not in text
         assert "/search" in text
         assert "/search_debug" in text
+        assert "/profile" in text
 
 
 class TestRememberHandler:
@@ -182,6 +188,25 @@ class TestSearchHandler:
             await search_handler(mock_update, mock_context)
         text = mock_update.message.reply_text.call_args[0][0]
         assert "❌" in text
+
+
+class TestProfileHandler:
+    """Test /profile command."""
+
+    @pytest.mark.asyncio
+    async def test_reads_active_managed_memories(self, mock_update, mock_context):
+        mock_context.args = ["counterpoints"]
+        with patch(
+            "telegram_bot.asyncio.to_thread",
+            new=AsyncMock(return_value="Active directives:\n- Act as an intellectual sparring partner"),
+        ) as mock_to_thread:
+            await profile_handler(mock_update, mock_context)
+        mock_to_thread.assert_awaited_once_with(
+            profile_handler.__globals__["get_active_memories"],
+            query="counterpoints",
+        )
+        text = mock_update.message.reply_text.call_args[0][0]
+        assert "Active directives" in text
 
 
 class TestAutoCapture:

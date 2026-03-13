@@ -237,3 +237,10 @@ def tokenize(text: str) -> list[str]:
 
 def normalized_text(text: str) -> str:
     return " ".join(tokenize(text))
+
+
+def topic_key(text: str, *, max_parts: int = 8, max_len: int = 80) -> str:
+    tokens = tokenize(text)[:max_parts]
+    if not tokens:
+        return ""
+    return "-".join(tokens)[:max_len].strip("-")

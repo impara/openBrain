@@ -17,7 +17,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from brain_core import capture_thought, search_brain, start_background_workers
+from brain_core import capture_thought, get_active_memories, search_brain, start_background_workers
 
 # ── Bootstrap ─────────────────────────────────
 load_dotenv()
@@ -61,6 +61,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• `/remember <text>` — Save anything; OpenBrain auto-detects enrichment\n"
         "• `/search <query>` — Search your memories\n"
         "• `/search_debug <query>` — Search with debug trace\n"
+        "• `/profile [query]` — Show active directives and preferences\n"
         "• `/help` — Show this message\n\n"
         "This repository is configured as a single-user brain.",
         parse_mode="Markdown",
@@ -75,6 +76,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• `/remember <text>` — Save anything; OpenBrain auto-detects whether to enrich it\n"
         "• `/search <query>` — Recall related memories\n"
         "• `/search_debug <query>` — Recall with scoring/debug trace\n"
+        "• `/profile [query]` — Show active directives and preferences\n"
         "• `/help` — Show this message\n\n"
         "Single-user mode: all messages go into the same local brain.",
         parse_mode="Markdown",
@@ -144,6 +146,18 @@ async def search_debug_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"❌ Error: {e}")
 
 
+async def profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /profile [query] — show active managed memories."""
+    query = _command_payload(update, context)
+    logger.info("Telegram /profile query=%r", query[:80] if query else "")
+    try:
+        result = await asyncio.to_thread(get_active_memories, query=query)
+        await update.message.reply_text(result)
+    except Exception as e:
+        logger.exception("Failed to read managed memory profile")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle plain text — auto-capture if enabled."""
     if not AUTO_CAPTURE:
@@ -184,6 +198,7 @@ def main() -> None:
     app.add_handler(CommandHandler("remember", remember_handler))
     app.add_handler(CommandHandler("search", search_handler))
     app.add_handler(CommandHandler("search_debug", search_debug_handler))
+    app.add_handler(CommandHandler("profile", profile_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     app.run_polling(drop_pending_updates=True)

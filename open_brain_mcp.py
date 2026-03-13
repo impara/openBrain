@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from brain_core import (
     capture_thought,
+    get_active_memories,
     ingest,
     search_brain,
     start_background_workers,
@@ -39,6 +40,7 @@ def mcp_ingest(
     content: str,
     source: str = "import",
     external_id: str | None = None,
+    managed_kind: str | None = None,
 ) -> str:
     """
     Flexible ingest for any channel: chat exports (ChatGPT, Claude, Antigravity),
@@ -50,11 +52,13 @@ def mcp_ingest(
         content: Text to remember (one message, note, or merged chunk).
         source: Origin label (e.g. chatgpt, claude, notes_pc).
         external_id: Optional stable id for dedup (e.g. conversation or note id).
+        managed_kind: Optional explicit managed-memory kind override: directive or preference.
     """
     return ingest(
         content=content,
         source=source,
         external_id=external_id,
+        managed_kind=managed_kind,
     )
 
 
@@ -80,6 +84,18 @@ def mcp_search_brain_debug(query: str) -> str:
         query: Natural language search query.
     """
     return search_brain(query, debug=True)
+
+
+@mcp.tool(name="get_active_memories")
+def mcp_get_active_memories(query: str = "", kind: str | None = None) -> str:
+    """
+    Returns active managed memories such as standing directives and preferences.
+
+    Args:
+        query: Optional semantic filter over active managed memories.
+        kind: Optional kind filter: directive or preference.
+    """
+    return get_active_memories(query=query, kind=kind)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ The project originally leaned on Mem0 for extraction and graph logic. It now kee
 The design intent is:
 - `raw_captures` preserves the original source text
 - `memory_chunks` powers semantic recall over raw passages and extracted facts
+- `managed_memories` stores active directives and preferences as coherent canonical records
 - Apache AGE adds entity and relationship traversal
 - the application owns the ingestion and ranking policy
 
@@ -60,6 +61,7 @@ That gives the project one database, one runtime truth, and one place to evolve 
 | Component | Role |
 |-----------|------|
 | **pgvector** | Runtime-owned HNSW vector search over `memory_store.memory_chunks` |
+| **Managed memory** | Canonical active directives and preferences with semantic retrieval over `memory_store.managed_memories` |
 | **Apache AGE** | Cypher-based knowledge graph for entity relationships |
 | **OpenBrain runtime** | Chunking, embedding, fact extraction, ranking, and queue orchestration |
 | **MCP** | Tool protocol for agent integration via Streamable HTTP or stdio |
@@ -133,6 +135,7 @@ Flexible entry point for any channel (chat exports, notes, imports). **Everythin
 | `content` | `str` | required | Text to remember (one message, note, or merged chunk) |
 | `source` | `str` | `"import"` | Origin: e.g. `chatgpt`, `claude`, `antigravity`, `notes_pc`, `notes_phone` |
 | `external_id` | `str` \| `null` | `null` | Optional stable id for dedup (e.g. conversation or note id) |
+| `managed_kind` | `str` \| `null` | `null` | Optional explicit managed-memory override: `directive` or `preference` |
 
 ### `search_brain`
 
@@ -141,6 +144,15 @@ Searches past memories via vector similarity and knowledge graph. Call this BEFO
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `query` | `str` | required | Natural language search query |
+
+### `get_active_memories`
+
+Returns active managed memories such as standing directives and preferences.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `query` | `str` | `""` | Optional semantic filter over active managed memories |
+| `kind` | `str` \| `null` | `null` | Optional kind filter: `directive` or `preference` |
 
 ---
 
@@ -221,7 +233,7 @@ For local IDE or Claude Desktop, run the server with stdio so the client spawns 
 
 ## Telegram Bot
 
-Chat with your brain from Telegram using `/remember` and `/search` commands.
+Chat with your brain from Telegram using `/remember`, `/search`, and `/profile`.
 
 ### Setup
 
@@ -239,6 +251,7 @@ Chat with your brain from Telegram using `/remember` and `/search` commands.
 | `/start` | Welcome message + usage |
 | `/remember <text>` | Save anything; OpenBrain auto-detects enrichment |
 | `/search <query>` | Search your memories |
+| `/profile [query]` | Show active directives and preferences |
 | `/help` | Show available commands |
 
 This repository runs one local brain. Telegram messages go into that same single-user store.
@@ -281,7 +294,7 @@ openBrain/
 ├── openbrain/           # Domain, application, and infrastructure packages
 ├── open_brain_mcp.py     # MCP server wrapping brain_core tools
 ├── telegram_bot.py       # Telegram bot client (/remember, /search)
-├── init.sql              # Database schema, partitioning, indexes, cron
+├── init.sql              # Minimal database bootstrap for extensions and schema
 ├── Dockerfile            # Custom Postgres 16 + AGE + pgvector
 ├── Dockerfile.mcp        # Python container for the MCP server
 ├── Dockerfile.telegram   # Python container for the Telegram bot

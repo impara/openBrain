@@ -21,6 +21,7 @@ class CaptureJob:
     attempt_count: int = 0
     source: str = "capture_thought"
     ingest_strategy: str = "personal"
+    managed_kind_override: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,49 @@ class MemoryChunk:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ManagedMemoryCandidate:
+    kind: str
+    topic: str
+    canonical_text: str
+    evidence_text: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ManagedMemoryRecord:
+    id: int
+    user_id: str
+    kind: str
+    topic: str
+    topic_key: str
+    canonical_text: str
+    status: str
+    created_at: datetime | str | None
+    updated_at: datetime | str | None
+    superseded_by: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ManagedMemoryMatch:
+    id: int
+    kind: str
+    topic: str
+    topic_key: str
+    canonical_text: str
+    created_at: datetime | str | None
+    updated_at: datetime | str | None
+    score: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ManagedMemoryResolution:
+    action: str
+    canonical_text: str
+
+
 @dataclass
 class EvidenceItem:
     source: str
@@ -75,3 +119,14 @@ class RawCaptureMatch:
     created_at: datetime | str | None
     content_len: int
     source: str | None
+
+
+@dataclass(frozen=True)
+class StoredRawCapture:
+    id: int
+    user_id: str
+    source: str
+    content: str
+    ingest_strategy: str
+    managed_kind_override: str | None
+    created_at: datetime | str | None

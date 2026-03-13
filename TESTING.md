@@ -100,6 +100,13 @@ Then in Telegram:
 1. Send `/start` to your bot — should get a welcome message
 2. Send `/remember I prefer dark mode` — should confirm capture or queueing
 3. Send `/search dark mode` — should return the memory immediately from raw capture or shortly after background indexing
+4. Send `/profile` — should show any active directives/preferences if managed memory has been created
+
+### Managed Memory Backfill
+To rebuild managed memories from existing raw captures without touching chunks or graph data:
+```bash
+docker compose exec open-brain-mcp python -m openbrain.admin.backfill_managed_memory --reset
+```
 
 ### Cleanup After Testing
 To reset the environment completely:
@@ -117,6 +124,7 @@ docker stop open_brain_mcp open_brain_telegram
 
 docker exec open_brain_postgres psql -U brain_user -d open_brain -v ON_ERROR_STOP=1 -c "
 TRUNCATE TABLE memory_store.raw_captures RESTART IDENTITY CASCADE;
+TRUNCATE TABLE memory_store.managed_memories RESTART IDENTITY CASCADE;
 TRUNCATE TABLE memory_store.graph_dlq RESTART IDENTITY;
 DO \$\$
 DECLARE r RECORD;
@@ -132,6 +140,7 @@ docker exec open_brain_postgres psql -U brain_user -d open_brain -c "
 SELECT 'memory_store.raw_captures' AS table_name, COUNT(*) AS rows FROM memory_store.raw_captures
 UNION ALL SELECT 'memory_store.capture_jobs', COUNT(*) FROM memory_store.capture_jobs
 UNION ALL SELECT 'memory_store.memory_chunks', COUNT(*) FROM memory_store.memory_chunks
+UNION ALL SELECT 'memory_store.managed_memories', COUNT(*) FROM memory_store.managed_memories
 UNION ALL SELECT 'memory_store.graph_dlq', COUNT(*) FROM memory_store.graph_dlq;
 "
 
@@ -142,8 +151,9 @@ docker start open_brain_mcp open_brain_telegram
 ```
 
 Notes:
-- The runtime retrieval path uses `memory_store.raw_captures`, `memory_store.capture_jobs`, and `memory_store.memory_chunks`.
+- The runtime retrieval path uses `memory_store.raw_captures`, `memory_store.capture_jobs`, `memory_store.memory_chunks`, and `memory_store.managed_memories`.
 - `TRUNCATE memory_store.raw_captures ... CASCADE` also clears `memory_store.capture_jobs` and `memory_store.memory_chunks`.
+- `TRUNCATE memory_store.managed_memories ... CASCADE` also clears `memory_store.managed_memory_sources`.
 - The active Apache AGE graph schema is `brain_graph_v2`, not `brain_graph`.
 
 If your local Postgres volume predates the current schema and reset/cleanup becomes noisy, use `docker compose down -v` for a full local reset.

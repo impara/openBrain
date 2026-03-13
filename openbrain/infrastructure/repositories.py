@@ -7,7 +7,15 @@ from typing import Any
 
 from psycopg2.extras import Json
 
-from openbrain.domain.models import CaptureJob, CapturePersistResult, MemoryChunk, RawCaptureMatch
+from openbrain.domain.models import (
+    CaptureJob,
+    CapturePersistResult,
+    ManagedMemoryMatch,
+    ManagedMemoryRecord,
+    MemoryChunk,
+    RawCaptureMatch,
+    StoredRawCapture,
+)
 from openbrain.domain.text import tokenize
 from openbrain.infrastructure.db import Database
 from openbrain.settings import OpenBrainSettings
@@ -20,6 +28,7 @@ _SEARCH_TERM_RE = re.compile(r"^[A-Za-z0-9\s\-_.@]+$")
 _SEARCH_TERM_MAX_LEN = 200
 _PROP_VALUE_MAX_LEN = 2000
 _SINGLE_USER_ID = "default"
+_MANAGED_KINDS = ("directive", "preference")
 
 
 def _vector_literal(values: list[float]) -> str:
@@ -56,7 +65,21 @@ class OpenBrainRepositories:
                 """
                 ALTER TABLE memory_store.raw_captures
                 ADD COLUMN IF NOT EXISTS ingest_strategy TEXT NOT NULL DEFAULT 'personal',
-                ADD COLUMN IF NOT EXISTS external_id TEXT;
+                ADD COLUMN IF NOT EXISTS external_id TEXT,
+                ADD COLUMN IF NOT EXISTS managed_kind_override TEXT;
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE memory_store.raw_captures
+                DROP CONSTRAINT IF EXISTS raw_captures_managed_kind_override_check;
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE memory_store.raw_captures
+                ADD CONSTRAINT raw_captures_managed_kind_override_check
+                CHECK (managed_kind_override IS NULL OR managed_kind_override IN ('directive', 'preference'));
                 """
             )
             cur.execute(
@@ -170,6 +193,92 @@ class OpenBrainRepositories:
                 WITH (m = 16, ef_construction = 128);
                 """
             )
+            cur.execute("SELECT to_regclass('memory_store.managed_memories');")
+            managed_row = cur.fetchone()
+            if managed_row and managed_row[0]:
+                cur.execute(
+                    """
+                    SELECT format_type(a.atttypid, a.atttypmod)
+                    FROM pg_attribute a
+                    JOIN pg_class c ON a.attrelid = c.oid
+                    JOIN pg_namespace n ON c.relnamespace = n.oid
+                    WHERE n.nspname = 'memory_store'
+                      AND c.relname = 'managed_memories'
+                      AND a.attname = 'embedding'
+                      AND NOT a.attisdropped;
+                    """
+                )
+                managed_type_row = cur.fetchone()
+                expected_type = f"vector({dims})"
+                if managed_type_row and managed_type_row[0] != expected_type:
+                    raise ValueError(
+                        f"memory_store.managed_memories.embedding is {managed_type_row[0]!r}, expected {expected_type!r}"
+                    )
+            else:
+                cur.execute(
+                    f"""
+                    CREATE TABLE memory_store.managed_memories (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        kind TEXT NOT NULL CHECK (kind IN ('directive', 'preference')),
+                        topic TEXT NOT NULL,
+                        topic_key TEXT NOT NULL,
+                        canonical_text TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'superseded')),
+                        superseded_by BIGINT REFERENCES memory_store.managed_memories(id) ON DELETE SET NULL,
+                        embedding vector({dims}) NOT NULL,
+                        embedding_provider TEXT NOT NULL,
+                        embedding_model TEXT NOT NULL,
+                        embedding_dims INTEGER NOT NULL,
+                        metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    """
+                )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_store.managed_memory_sources (
+                    managed_memory_id BIGINT NOT NULL REFERENCES memory_store.managed_memories(id) ON DELETE CASCADE,
+                    raw_capture_id BIGINT NOT NULL REFERENCES memory_store.raw_captures(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (managed_memory_id, raw_capture_id)
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_managed_memories_active_topic
+                ON memory_store.managed_memories (user_id, kind, topic_key)
+                WHERE status = 'active';
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_managed_memories_user_updated
+                ON memory_store.managed_memories (user_id, updated_at DESC);
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_managed_memories_status
+                ON memory_store.managed_memories (status, kind, topic_key);
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_managed_memories_metadata_gin
+                ON memory_store.managed_memories USING gin (metadata);
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_managed_memories_embedding_hnsw
+                ON memory_store.managed_memories
+                USING hnsw (embedding vector_cosine_ops)
+                WITH (m = 16, ef_construction = 128);
+                """
+            )
 
     def capture_and_enqueue(
         self,
@@ -179,9 +288,12 @@ class OpenBrainRepositories:
         source: str,
         ingest_strategy: str,
         external_id: str | None,
+        managed_kind_override: str | None,
     ) -> CapturePersistResult:
         if not thought:
             return CapturePersistResult(raw_capture_id=None, job_id=None, duplicate=False)
+        if managed_kind_override and managed_kind_override not in _MANAGED_KINDS:
+            raise ValueError(f"Unsupported managed_kind_override: {managed_kind_override!r}")
 
         with self.db.cursor(commit=True) as (_, cur):
             inserted_new = True
@@ -190,8 +302,8 @@ class OpenBrainRepositories:
                     """
                     WITH inserted AS (
                         INSERT INTO memory_store.raw_captures
-                        (user_id, source, content, content_len, ingest_strategy, external_id)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                        (user_id, source, content, content_len, ingest_strategy, external_id, managed_kind_override)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT DO NOTHING
                         RETURNING id
                     )
@@ -213,6 +325,7 @@ class OpenBrainRepositories:
                         len(thought),
                         ingest_strategy,
                         external_id,
+                        managed_kind_override,
                         user_id,
                         source,
                         external_id,
@@ -225,11 +338,11 @@ class OpenBrainRepositories:
                 cur.execute(
                     """
                     INSERT INTO memory_store.raw_captures
-                    (user_id, source, content, content_len, ingest_strategy, external_id)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    (user_id, source, content, content_len, ingest_strategy, external_id, managed_kind_override)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING id;
                     """,
-                    (user_id, source, thought, len(thought), ingest_strategy, external_id),
+                    (user_id, source, thought, len(thought), ingest_strategy, external_id, managed_kind_override),
                 )
                 row = cur.fetchone()
                 raw_capture_id = row[0] if row else None
@@ -280,7 +393,7 @@ class OpenBrainRepositories:
                     attempt_count = j.attempt_count + 1
                 FROM next_job, memory_store.raw_captures r
                 WHERE j.id = next_job.id AND r.id = j.raw_capture_id
-                RETURNING j.id, j.raw_capture_id, j.user_id, r.content, j.attempt_count, r.source, r.ingest_strategy;
+                RETURNING j.id, j.raw_capture_id, j.user_id, r.content, j.attempt_count, r.source, r.ingest_strategy, r.managed_kind_override;
                 """,
                 params,
             )
@@ -295,6 +408,7 @@ class OpenBrainRepositories:
                 attempt_count=row[4],
                 source=row[5] if len(row) > 5 else "capture_thought",
                 ingest_strategy=row[6] if len(row) > 6 else "personal",
+                managed_kind_override=row[7] if len(row) > 7 else None,
             )
 
     def mark_done(self, job: CaptureJob) -> None:
@@ -392,6 +506,31 @@ class OpenBrainRepositories:
             for row in rows
         ]
 
+    def list_for_backfill(self, *, user_id: str) -> list[StoredRawCapture]:
+        with self.db.cursor() as (_, cur):
+            cur.execute(
+                """
+                SELECT id, user_id, source, content, ingest_strategy, managed_kind_override, created_at
+                FROM memory_store.raw_captures
+                WHERE user_id = %s
+                ORDER BY created_at ASC, id ASC;
+                """,
+                (user_id,),
+            )
+            rows = cur.fetchall()
+        return [
+            StoredRawCapture(
+                id=row[0],
+                user_id=row[1],
+                source=row[2],
+                content=row[3],
+                ingest_strategy=row[4] if len(row) > 4 else "personal",
+                managed_kind_override=row[5] if len(row) > 5 else None,
+                created_at=row[6] if len(row) > 6 else None,
+            )
+            for row in rows
+        ]
+
     def upsert_chunks(self, chunks: list[MemoryChunk]) -> int:
         if not chunks:
             return 0
@@ -483,6 +622,267 @@ class OpenBrainRepositories:
             }
             for row in rows
         ]
+
+    def find_active_by_topic(self, *, user_id: str, kind: str, topic_key: str) -> list[ManagedMemoryRecord]:
+        with self.db.cursor() as (_, cur):
+            cur.execute(
+                """
+                SELECT id, user_id, kind, topic, topic_key, canonical_text, status, created_at, updated_at, superseded_by, metadata
+                FROM memory_store.managed_memories
+                WHERE user_id = %s AND kind = %s AND topic_key = %s AND status = 'active'
+                ORDER BY updated_at DESC, id DESC;
+                """,
+                (user_id, kind, topic_key),
+            )
+            rows = cur.fetchall()
+        return [
+            ManagedMemoryRecord(
+                id=row[0],
+                user_id=row[1],
+                kind=row[2],
+                topic=row[3],
+                topic_key=row[4],
+                canonical_text=row[5],
+                status=row[6],
+                created_at=row[7],
+                updated_at=row[8],
+                superseded_by=row[9],
+                metadata=row[10] or {},
+            )
+            for row in rows
+        ]
+
+    def insert_managed_memory(
+        self,
+        *,
+        user_id: str,
+        kind: str,
+        topic: str,
+        topic_key: str,
+        canonical_text: str,
+        embedding: list[float],
+        embedding_provider: str,
+        embedding_model: str,
+        embedding_dims: int,
+        metadata: dict[str, Any],
+        raw_capture_ids: list[int],
+    ) -> int:
+        with self.db.cursor(commit=True) as (_, cur):
+            cur.execute(
+                """
+                INSERT INTO memory_store.managed_memories (
+                    user_id,
+                    kind,
+                    topic,
+                    topic_key,
+                    canonical_text,
+                    status,
+                    embedding,
+                    embedding_provider,
+                    embedding_model,
+                    embedding_dims,
+                    metadata
+                ) VALUES (%s, %s, %s, %s, %s, 'active', %s::vector, %s, %s, %s, %s)
+                RETURNING id;
+                """,
+                (
+                    user_id,
+                    kind,
+                    topic,
+                    topic_key,
+                    canonical_text,
+                    _vector_literal(embedding),
+                    embedding_provider,
+                    embedding_model,
+                    embedding_dims,
+                    Json(metadata),
+                ),
+            )
+            row = cur.fetchone()
+            managed_memory_id = int(row[0])
+            for raw_capture_id in sorted({raw_id for raw_id in raw_capture_ids if raw_id is not None}):
+                cur.execute(
+                    """
+                    INSERT INTO memory_store.managed_memory_sources (managed_memory_id, raw_capture_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT (managed_memory_id, raw_capture_id) DO NOTHING;
+                    """,
+                    (managed_memory_id, raw_capture_id),
+                )
+        return managed_memory_id
+
+    def update_managed_memory(
+        self,
+        *,
+        managed_memory_id: int,
+        canonical_text: str,
+        embedding: list[float],
+        embedding_provider: str,
+        embedding_model: str,
+        embedding_dims: int,
+        metadata: dict[str, Any],
+        raw_capture_ids: list[int],
+    ) -> None:
+        with self.db.cursor(commit=True) as (_, cur):
+            cur.execute(
+                """
+                UPDATE memory_store.managed_memories
+                SET canonical_text = %s,
+                    embedding = %s::vector,
+                    embedding_provider = %s,
+                    embedding_model = %s,
+                    embedding_dims = %s,
+                    metadata = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s;
+                """,
+                (
+                    canonical_text,
+                    _vector_literal(embedding),
+                    embedding_provider,
+                    embedding_model,
+                    embedding_dims,
+                    Json(metadata),
+                    managed_memory_id,
+                ),
+            )
+            for raw_capture_id in sorted({raw_id for raw_id in raw_capture_ids if raw_id is not None}):
+                cur.execute(
+                    """
+                    INSERT INTO memory_store.managed_memory_sources (managed_memory_id, raw_capture_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT (managed_memory_id, raw_capture_id) DO NOTHING;
+                    """,
+                    (managed_memory_id, raw_capture_id),
+                )
+
+    def supersede_managed_memories(
+        self,
+        *,
+        managed_memory_ids: list[int],
+        superseded_by: int | None,
+    ) -> None:
+        ids = sorted({int(record_id) for record_id in managed_memory_ids if record_id})
+        if not ids:
+            return
+        with self.db.cursor(commit=True) as (_, cur):
+            cur.execute(
+                """
+                UPDATE memory_store.managed_memories
+                SET status = 'superseded',
+                    superseded_by = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ANY(%s);
+                """,
+                (superseded_by, ids),
+            )
+
+    def search_managed_memories(
+        self,
+        query_embedding: list[float],
+        *,
+        user_id: str,
+        limit: int = 5,
+        kind: str | None = None,
+    ) -> list[ManagedMemoryMatch]:
+        vector = _vector_literal(query_embedding)
+        with self.db.cursor() as (_, cur):
+            cur.execute("SET LOCAL hnsw.ef_search = 100;")
+            if kind:
+                cur.execute(
+                    """
+                    SELECT id, kind, topic, topic_key, canonical_text, created_at, updated_at, embedding <=> %s::vector AS score, metadata
+                    FROM memory_store.managed_memories
+                    WHERE user_id = %s AND status = 'active' AND kind = %s
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s;
+                    """,
+                    (vector, user_id, kind, vector, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id, kind, topic, topic_key, canonical_text, created_at, updated_at, embedding <=> %s::vector AS score, metadata
+                    FROM memory_store.managed_memories
+                    WHERE user_id = %s AND status = 'active'
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s;
+                    """,
+                    (vector, user_id, vector, limit),
+                )
+            rows = cur.fetchall()
+        return [
+            ManagedMemoryMatch(
+                id=row[0],
+                kind=row[1],
+                topic=row[2],
+                topic_key=row[3],
+                canonical_text=row[4],
+                created_at=row[5],
+                updated_at=row[6],
+                score=row[7],
+                metadata=row[8] or {},
+            )
+            for row in rows
+        ]
+
+    def list_active_managed_memories(
+        self,
+        *,
+        user_id: str,
+        kind: str | None = None,
+        limit: int = 50,
+    ) -> list[ManagedMemoryRecord]:
+        with self.db.cursor() as (_, cur):
+            if kind:
+                cur.execute(
+                    """
+                    SELECT id, user_id, kind, topic, topic_key, canonical_text, status, created_at, updated_at, superseded_by, metadata
+                    FROM memory_store.managed_memories
+                    WHERE user_id = %s AND status = 'active' AND kind = %s
+                    ORDER BY kind ASC, updated_at DESC, id DESC
+                    LIMIT %s;
+                    """,
+                    (user_id, kind, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id, user_id, kind, topic, topic_key, canonical_text, status, created_at, updated_at, superseded_by, metadata
+                    FROM memory_store.managed_memories
+                    WHERE user_id = %s AND status = 'active'
+                    ORDER BY kind ASC, updated_at DESC, id DESC
+                    LIMIT %s;
+                    """,
+                    (user_id, limit),
+                )
+            rows = cur.fetchall()
+        return [
+            ManagedMemoryRecord(
+                id=row[0],
+                user_id=row[1],
+                kind=row[2],
+                topic=row[3],
+                topic_key=row[4],
+                canonical_text=row[5],
+                status=row[6],
+                created_at=row[7],
+                updated_at=row[8],
+                superseded_by=row[9],
+                metadata=row[10] or {},
+            )
+            for row in rows
+        ]
+
+    def clear_managed_memories(self, *, user_id: str) -> None:
+        with self.db.cursor(commit=True) as (_, cur):
+            cur.execute(
+                """
+                DELETE FROM memory_store.managed_memories
+                WHERE user_id = %s;
+                """,
+                (user_id,),
+            )
 
 
 class AGEGraphRepository:

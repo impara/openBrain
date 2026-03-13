@@ -92,6 +92,30 @@ def test_upsert_chunks_uses_pgvector_literal_and_metadata_json():
     assert params[6] == "[0.1,0.2,0.3]"
 
 
+def test_capture_and_enqueue_persists_managed_kind_override():
+    cursor = MagicMock()
+    cursor.fetchone.side_effect = [(1, True), (2,)]
+
+    @contextmanager
+    def fake_cursor(*, commit=False):
+        del commit
+        yield None, cursor
+
+    db = MagicMock()
+    db.cursor = fake_cursor
+    repo = OpenBrainRepositories(db, make_settings())
+    repo.capture_and_enqueue(
+        "Act as an intellectual sparring partner.",
+        user_id="default",
+        source="import",
+        ingest_strategy="personal",
+        external_id=None,
+        managed_kind_override="directive",
+    )
+    params = cursor.execute.call_args_list[0].args[1]
+    assert params[-1] == "directive"
+
+
 def test_search_vectors_returns_runtime_chunk_shape():
     cursor = MagicMock()
     cursor.fetchall.return_value = [
@@ -137,3 +161,32 @@ def test_search_vectors_can_filter_ingest_modes():
     params = cursor.execute.call_args_list[1].args[1]
     assert "ingest_mode = ANY(%s)" in sql
     assert params[2] == ["raw"]
+
+
+def test_search_managed_memories_returns_active_record_shape():
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        (
+            1,
+            "directive",
+            "conversation style",
+            "conversation-style",
+            "Act as an intellectual sparring partner",
+            datetime.now(timezone.utc),
+            datetime.now(timezone.utc),
+            0.03,
+            {"topic": "conversation style"},
+        )
+    ]
+
+    @contextmanager
+    def fake_cursor(*, commit=False):
+        del commit
+        yield None, cursor
+
+    db = MagicMock()
+    db.cursor = fake_cursor
+    repo = OpenBrainRepositories(db, make_settings())
+    result = repo.search_managed_memories([0.1, 0.2], user_id="default", limit=5)
+    assert result[0].kind == "directive"
+    assert result[0].canonical_text == "Act as an intellectual sparring partner"

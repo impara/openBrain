@@ -24,12 +24,38 @@ def capture_thought(thought: str) -> str:
     return get_app().capture_thought(thought)
 
 
-def ingest(content: str, source: str = "import", external_id: str | None = None) -> str:
-    return get_app().ingest(content, source=source, external_id=external_id)
+def ingest(
+    content: str,
+    source: str = "import",
+    external_id: str | None = None,
+    managed_kind: str | None = None,
+) -> str:
+    kwargs = {"source": source, "external_id": external_id}
+    if managed_kind is not None:
+        kwargs["managed_kind"] = managed_kind
+    return get_app().ingest(content, **kwargs)
+
+
+def ingest_managed(
+    content: str,
+    *,
+    kind: str,
+    source: str = "import",
+    external_id: str | None = None,
+) -> str:
+    return get_app().ingest(content, source=source, external_id=external_id, managed_kind=kind)
 
 
 def search_brain(query: str, debug: bool = False) -> str:
     return get_app().search_brain(query, debug=debug)
+
+
+def get_active_memories(query: str = "", kind: str | None = None) -> str:
+    return get_app().get_active_memories(query=query, kind=kind)
+
+
+def rebuild_managed_memories(*, reset: bool = False) -> str:
+    return get_app().rebuild_managed_memories(reset=reset)
 
 
 def start_background_workers() -> None:
@@ -58,10 +84,13 @@ __all__ = [
     "OpenBrainSettings",
     "build_app",
     "capture_thought",
+    "get_active_memories",
     "get_app",
     "get_capture_job_stats",
     "ingest",
+    "ingest_managed",
     "process_next_capture_job",
+    "rebuild_managed_memories",
     "search_brain",
     "start_background_workers",
     "stop_background_workers",

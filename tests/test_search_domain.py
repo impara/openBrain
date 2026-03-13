@@ -101,3 +101,34 @@ def test_best_matching_segment_does_not_merge_previous_verse_when_target_segment
     )
     assert "Everything is perishing except His Face" in segment
     assert "49:13" not in segment
+
+
+def test_synthesize_answer_prefers_managed_memory_when_present():
+    evidence = build_candidates(
+        "what counterpoints",
+        vector_results=[
+            {
+                "content": "Provide counterpoints.",
+                "score": 0.02,
+                "metadata": {"origin": "capture_thought", "ingest_mode": "fact"},
+            }
+        ],
+        relations=[],
+        raw_matches=[],
+        managed_results=[
+            {
+                "id": 1,
+                "kind": "directive",
+                "topic": "conversation style",
+                "topic_key": "conversation-style",
+                "canonical_text": (
+                    "Act as an intellectual sparring partner. Analyze assumptions, provide counterpoints, "
+                    "test reasoning, offer alternatives, and prioritize truth over agreement"
+                ),
+                "score": 0.01,
+            }
+        ],
+    )
+    answer = synthesize_answer("what counterpoints", evidence)
+    assert "Based on your active directive" in answer
+    assert "intellectual sparring partner" in answer
