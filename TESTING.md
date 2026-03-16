@@ -28,12 +28,17 @@ docker compose exec open-brain-db psql -U brain_user -d open_brain -c "SELECT ex
 Run the full test suite covering provider settings, provider adapters, runtime repositories, Apache AGE graph behavior, async queue behavior, auto-classification, and regression fixes.
 
 ### Run Local Tests
-Requires dependencies installed (`pip install -r requirements.txt`):
+Recommended: use a local virtualenv so `pytest` and deps are available and isolated.
 ```bash
-python -m pytest tests/ -v
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+pip install pytest pytest-asyncio
+pytest tests/ -v
 ```
 
 ### Run Tests inside Docker
+Note: the default `open-brain-mcp` image is optimized for runtime, and may not include the repo `tests/` directory unless you add a bind mount or build a dev/test image.
 ```bash
 docker compose exec open-brain-mcp python -m pytest tests/ -v
 ```

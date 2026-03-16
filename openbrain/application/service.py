@@ -173,19 +173,25 @@ class OpenBrainApplication:
 
         intent = detect_search_intent(query)
         query_embedding = self.embedding_provider.embed(query)
-        managed_results = (
-            []
-            if intent == "reference"
-            else self.managed_repo.search_managed_memories(
+        if intent == "reference":
+            managed_results = []
+        elif intent == "directive":
+            managed_results = self.managed_repo.search_managed_memories(
+                query_embedding,
+                user_id=self.brain_user_id(),
+                limit=8,
+                kind="directive",
+            )
+        else:
+            managed_results = self.managed_repo.search_managed_memories(
                 query_embedding,
                 user_id=self.brain_user_id(),
                 limit=6,
             )
-        )
         vector_results = self.vector_repo.search_vectors(
             query_embedding,
             user_id=self.brain_user_id(),
-            limit=12 if intent == "reference" else 10,
+            limit=12 if intent == "reference" else (6 if intent == "directive" else 10),
             ingest_modes=("raw",) if intent == "reference" else ("raw", "fact"),
         )
         raw_matches = self.repositories.search_raw(

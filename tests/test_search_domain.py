@@ -132,3 +132,39 @@ def test_synthesize_answer_prefers_managed_memory_when_present():
     answer = synthesize_answer("what counterpoints", evidence)
     assert "Based on your active directive" in answer
     assert "intellectual sparring partner" in answer
+
+
+def test_rank_evidence_does_not_drop_managed_directive_for_directive_intent_queries():
+    evidence = build_candidates(
+        "what counterpoints did not use the managed directive",
+        vector_results=[
+            {
+                "content": "Analyze assumptions and provide counterpoints to test reasoning.",
+                "score": 0.01,
+                "metadata": {"origin": "capture_thought", "ingest_mode": "fact"},
+            }
+        ],
+        relations=[],
+        raw_matches=[],
+        managed_results=[
+            {
+                "id": 1,
+                "kind": "directive",
+                "topic": "conversation style",
+                "topic_key": "conversation-style",
+                "canonical_text": "Act as an intellectual sparring partner.",
+                # High distance -> low vector similarity; also no token overlap with query -> previously droppable
+                "score": 0.60,
+                "created_at": None,
+                "updated_at": None,
+                "metadata": {},
+            }
+        ],
+    )
+    ranked, debug = rank_evidence(
+        "what counterpoints did not use the managed directive",
+        evidence,
+        intent="directive",
+    )
+    assert any(item.source == "managed" for item in ranked)
+    assert not any(item.get("reason") == "low_overlap" and item.get("source") == "managed" for item in debug["dropped"])

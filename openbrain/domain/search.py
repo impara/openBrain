@@ -17,8 +17,19 @@ MAX_SOURCE_TEXT = 180
 MAX_ANSWER_TEXT = 520
 SEARCH_INTENT_GENERAL = "general"
 SEARCH_INTENT_REFERENCE = "reference"
+SEARCH_INTENT_DIRECTIVE = "directive"
 _CITATION_RE = re.compile(r"\b\d{1,3}:\d{1,3}\b")
 _QUOTE_QUERY_RE = re.compile(r"\b(what does|what is|what says|say|quote|verse|ayah|surah|meaning)\b", re.IGNORECASE)
+_DIRECTIVE_QUERY_RE = re.compile(
+    r"\b("
+    r"how should you answer|how should you respond|how do you respond|"
+    r"what counterpoints|counterpoints|"
+    r"what is my directive|what are my directives|active directive|"
+    r"what is my preference|what are my preferences|active preference|"
+    r"response style|conversation style|tone|verbosity|be concise|only go deep"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -116,6 +127,8 @@ def _query_citations(query: str) -> list[str]:
 def detect_search_intent(query: str) -> str:
     if _query_citations(query) or _QUOTE_QUERY_RE.search(query or ""):
         return SEARCH_INTENT_REFERENCE
+    if _DIRECTIVE_QUERY_RE.search(query or ""):
+        return SEARCH_INTENT_DIRECTIVE
     return SEARCH_INTENT_GENERAL
 
 
@@ -416,6 +429,10 @@ def rank_evidence(
         has_citation = bool(query_citations) and any(citation in text.lower() for citation in query_citations)
         if has_citation:
             components["final"] = max(0.0, min(1.0, components["final"] + 0.2))
+        if intent == SEARCH_INTENT_DIRECTIVE and item.source == "managed":
+            managed_kind = (item.metadata or {}).get("managed_kind")
+            if managed_kind == "directive":
+                components["final"] = max(0.0, min(1.0, components["final"] + 0.18))
         debug_candidates.append(
             {
                 "source": item.source,
@@ -440,7 +457,11 @@ def rank_evidence(
             )
             continue
 
-        if components["overlap"] < 0.05 and components["vector_similarity"] < 0.72:
+        if (
+            intent != SEARCH_INTENT_DIRECTIVE
+            and components["overlap"] < 0.05
+            and components["vector_similarity"] < 0.72
+        ):
             dropped.append(
                 {
                     "source": item.source,

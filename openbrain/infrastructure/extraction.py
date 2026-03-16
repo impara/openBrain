@@ -22,6 +22,68 @@ from openbrain.domain.text import heuristic_bullets, normalized_text
 logger = logging.getLogger("open_brain")
 
 _MANAGED_KINDS = {"directive", "preference"}
+_MANAGED_EXTRACTOR_PROMPT_VERSION = "2026-03-16-a"
+
+
+def _looks_like_response_style_clause(text: str, *, topic: str = "") -> bool:
+    lower = " ".join((text or "").lower().split())
+    topic_lower = " ".join((topic or "").lower().split())
+    if "response style" in topic_lower or "conversation style" in topic_lower:
+        return True
+    markers = (
+        "prefer concise",
+        "concise answers",
+        "be concise",
+        "only go deep",
+        "only go into detail",
+        "unless i ask",
+        "when i ask",
+        "if i ask",
+        "tone",
+        "non-adversarial",
+        "constructive",
+        "calm",
+        "format",
+        "citations",
+        "bullet",
+        "verbosity",
+        "depth",
+        "short answer",
+        "brief",
+    )
+    return any(marker in lower for marker in markers)
+
+
+def _merge_canonical_texts(parts: list[str], *, max_len: int = 420) -> str:
+    cleaned: list[str] = []
+    seen = set()
+    for part in parts:
+        item = " ".join((part or "").split()).strip().rstrip(".")
+        if not item:
+            continue
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(item)
+
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+
+    merged = cleaned[0]
+    for part in cleaned[1:]:
+        candidate = f"{merged}. {part}".strip()
+        if len(candidate) <= max_len:
+            merged = candidate
+            continue
+        candidate = f"{merged}; {part}".strip()
+        if len(candidate) <= max_len:
+            merged = candidate
+            continue
+        break
+    return merged[:max_len].rstrip(". ").strip()
 
 
 class LLMBulletExtractor(BulletExtractor):
@@ -115,6 +177,11 @@ class LLMManagedMemoryExtractor(ManagedMemoryExtractor):
                     "Extract managed memories from the text. "
                     f"{kind_instruction}"
                     "Be conservative. Ignore transient requests, one-off tasks, and normal prose. "
+                    "Default to returning at most 1 memory per input. "
+                    "Only return multiple memories when they are clearly separable by kind or topic. "
+                    "Response-style modifiers like verbosity, tone, formatting, and conditions like "
+                    "'only go deep when I ask' should stay attached to the preference record, not become "
+                    "separate directives. "
                     "Return JSON only with shape: "
                     "{\"memories\": [{\"kind\": \"directive|preference\", "
                     "\"topic\": \"...\", \"canonical_text\": \"...\", \"evidence_text\": \"...\"}]}"
@@ -158,10 +225,68 @@ class LLMManagedMemoryExtractor(ManagedMemoryExtractor):
                     topic=topic,
                     canonical_text=canonical_text.rstrip("."),
                     evidence_text=evidence_text,
-                    metadata={"forced_kind": forced_kind} if forced_kind else {},
+                    metadata={
+                        **({"forced_kind": forced_kind} if forced_kind else {}),
+                        "prompt_version": _MANAGED_EXTRACTOR_PROMPT_VERSION,
+                    },
                 )
             )
-        return results
+        if forced_kind in _MANAGED_KINDS:
+            return results
+        if len(results) <= 1:
+            return results
+
+        # Conservative consolidation: avoid splitting one response-style preference into multiple records.
+        preferences = [item for item in results if item.kind == "preference"]
+        directives = [item for item in results if item.kind == "directive"]
+        if preferences and directives:
+            base = max(preferences, key=lambda item: len(item.canonical_text))
+            attachable = [
+                item
+                for item in directives
+                if normalized_text(item.topic) == normalized_text(base.topic)
+                and _looks_like_response_style_clause(item.canonical_text, topic=item.topic)
+            ]
+            if attachable:
+                merged_text = _merge_canonical_texts([base.canonical_text, *[item.canonical_text for item in attachable]])
+                if merged_text:
+                    base = ManagedMemoryCandidate(
+                        kind="preference",
+                        topic=base.topic,
+                        canonical_text=merged_text,
+                        evidence_text=base.evidence_text,
+                        metadata=dict(base.metadata),
+                    )
+                    remaining = [
+                        item
+                        for item in results
+                        if item.kind != "directive" or item not in attachable
+                    ]
+                    remaining = [item for item in remaining if item.kind != "preference"]
+                    return [base, *remaining]
+
+        # If the extractor returned multiple items of the same kind/topic, merge to one.
+        by_group: dict[tuple[str, str], list[ManagedMemoryCandidate]] = {}
+        for item in results:
+            key = (item.kind, normalized_text(item.topic))
+            by_group.setdefault(key, []).append(item)
+        consolidated: list[ManagedMemoryCandidate] = []
+        for (_, _), group in by_group.items():
+            if len(group) == 1:
+                consolidated.append(group[0])
+                continue
+            base = max(group, key=lambda item: len(item.canonical_text))
+            merged_text = _merge_canonical_texts([item.canonical_text for item in group])
+            consolidated.append(
+                ManagedMemoryCandidate(
+                    kind=base.kind,
+                    topic=base.topic,
+                    canonical_text=merged_text or base.canonical_text,
+                    evidence_text=base.evidence_text,
+                    metadata=dict(base.metadata),
+                )
+            )
+        return consolidated
 
 
 class LLMManagedMemoryResolver(ManagedMemoryResolver):
