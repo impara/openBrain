@@ -79,7 +79,7 @@ docker compose logs -f open-brain-mcp
 ### Testing with MCP Inspector
 Since the server is now running in **Streamable HTTP mode**, you can test it using the [MCP Inspector](https://github.com/modelcontextprotocol/inspector):
 ```bash
-npx @modelcontextprotocol/inspector http://localhost:8001/mcp
+npx @modelcontextprotocol/inspector http://localhost:8000/mcp
 ```
 
 ### Manual E2E Smoke Test (Direct Tool Call)
@@ -88,6 +88,18 @@ You can still run a python script to test the logic directly:
 2. Run:
 ```bash
 docker compose exec open-brain-mcp python -c "from brain_core import capture_thought; print(capture_thought('Testing background brain.'))"
+```
+
+### CRM UI / API Smoke Test (Optional)
+
+If you enabled the optional CRM services (`crm-api`, `crm-ui`) in `docker-compose.yml`:
+
+```bash
+# Check CRM API health
+curl -f http://localhost:8002/health
+
+# Open the UI in a browser
+# http://localhost:3000
 ```
 
 ### Telegram Bot Verification

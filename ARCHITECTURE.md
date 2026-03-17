@@ -27,6 +27,7 @@ The result is a simpler mental model:
 - `memory_chunks` is the runtime retrieval index for raw passages and extracted facts
 - `managed_memories` is the canonical layer for active directives and preferences
 - Apache AGE is the relational index for entities and edges
+- `crm.*` (optional) is a relational “human door” surface for structured personal workflows (e.g. contacts + interaction timelines) linked back to `raw_captures`
 - the OpenBrain application owns ingestion, enrichment, and ranking policy
 
 This keeps one unified database strategy without outsourcing the actual memory behavior.

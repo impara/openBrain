@@ -43,7 +43,7 @@ class OpenBrainRepositories:
     def ensure_infrastructure(self) -> None:
         dims = self.settings.embedding.dims
         with self.db.cursor(commit=True) as (_, cur):
-            # Coolify/compose can start app containers before docker-entrypoint init
+            # Start app containers before docker-entrypoint init
             # scripts have finished creating extensions. Ensure the runtime-critical
             # extensions exist before creating any vector or AGE-backed objects.
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public;")
@@ -280,6 +280,76 @@ class OpenBrainRepositories:
                 """
             )
 
+            # CRM schema (single-user personal CRM surfaces)
+            cur.execute("CREATE SCHEMA IF NOT EXISTS crm;")
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS crm.contacts (
+                    id BIGSERIAL PRIMARY KEY,
+                    full_name TEXT NOT NULL,
+                    first_name TEXT,
+                    last_name TEXT,
+                    email TEXT,
+                    phone TEXT,
+                    company TEXT,
+                    role TEXT,
+                    location TEXT,
+                    tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    notes TEXT,
+                    canonical_id BIGINT REFERENCES crm.contacts(id) ON DELETE SET NULL,
+                    last_modified_by TEXT NOT NULL DEFAULT 'agent',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            cur.execute(
+                """
+                -- Unique constraint (allows multiple NULL emails) so ON CONFLICT (email) is valid.
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_crm_contacts_email_unique
+                ON crm.contacts (email);
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_crm_contacts_company_name
+                ON crm.contacts (company, full_name);
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS crm.contact_aliases (
+                    id BIGSERIAL PRIMARY KEY,
+                    contact_id BIGINT NOT NULL REFERENCES crm.contacts(id) ON DELETE CASCADE,
+                    alias_name TEXT,
+                    alias_email TEXT,
+                    source TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS crm.interactions (
+                    id BIGSERIAL PRIMARY KEY,
+                    contact_id BIGINT NOT NULL REFERENCES crm.contacts(id) ON DELETE CASCADE,
+                    raw_capture_id BIGINT REFERENCES memory_store.raw_captures(id) ON DELETE SET NULL,
+                    channel TEXT NOT NULL DEFAULT 'chat',
+                    direction TEXT NOT NULL DEFAULT 'outbound',
+                    summary TEXT NOT NULL,
+                    source TEXT,
+                    occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_crm_interactions_contact_occurred
+                ON crm.interactions (contact_id, occurred_at DESC);
+                """
+            )
+
     def capture_and_enqueue(
         self,
         thought: str,
@@ -363,6 +433,126 @@ class OpenBrainRepositories:
             job_row = cur.fetchone()
             job_id = job_row[0] if job_row else None
             return CapturePersistResult(raw_capture_id=raw_capture_id, job_id=job_id, duplicate=not inserted_new)
+
+    # ── CRM helpers ──────────────────────────────────────────────────────────
+
+    def crm_upsert_contact(
+        self,
+        *,
+        full_name: str,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        email: str | None = None,
+        phone: str | None = None,
+        company: str | None = None,
+        role: str | None = None,
+        location: str | None = None,
+        tags: list[str] | None = None,
+        notes: str | None = None,
+        last_modified_by: str = "agent",
+    ) -> int:
+        clean_full_name = " ".join((full_name or "").split())
+        if not clean_full_name:
+            raise ValueError("full_name is required for CRM contact")
+        tags_value = tags or []
+        with self.db.cursor(commit=True) as (_, cur):
+            if email:
+                cur.execute(
+                    """
+                    INSERT INTO crm.contacts (
+                        full_name, first_name, last_name, email, phone,
+                        company, role, location, tags, notes, last_modified_by
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                    ON CONFLICT (email)
+                    DO UPDATE SET
+                        full_name = EXCLUDED.full_name,
+                        first_name = COALESCE(EXCLUDED.first_name, crm.contacts.first_name),
+                        last_name = COALESCE(EXCLUDED.last_name, crm.contacts.last_name),
+                        phone = COALESCE(EXCLUDED.phone, crm.contacts.phone),
+                        company = COALESCE(EXCLUDED.company, crm.contacts.company),
+                        role = COALESCE(EXCLUDED.role, crm.contacts.role),
+                        location = COALESCE(EXCLUDED.location, crm.contacts.location),
+                        tags = CASE
+                            WHEN EXCLUDED.tags <> '[]'::jsonb THEN EXCLUDED.tags
+                            ELSE crm.contacts.tags
+                        END,
+                        notes = COALESCE(EXCLUDED.notes, crm.contacts.notes),
+                        last_modified_by = EXCLUDED.last_modified_by,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING id;
+                    """,
+                    (
+                        clean_full_name,
+                        first_name,
+                        last_name,
+                        email,
+                        phone,
+                        company,
+                        role,
+                        location,
+                        json.dumps(tags_value),
+                        notes,
+                        last_modified_by,
+                    ),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO crm.contacts (
+                        full_name, first_name, last_name, email, phone,
+                        company, role, location, tags, notes, last_modified_by
+                    )
+                    VALUES (%s, %s, %s, NULL, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                    RETURNING id;
+                    """,
+                    (
+                        clean_full_name,
+                        first_name,
+                        last_name,
+                        phone,
+                        company,
+                        role,
+                        location,
+                        json.dumps(tags_value),
+                        notes,
+                        last_modified_by,
+                    ),
+                )
+            row = cur.fetchone()
+        return int(row[0])
+
+    def crm_log_interaction(
+        self,
+        *,
+        contact_id: int,
+        raw_capture_id: int | None,
+        summary: str,
+        channel: str = "chat",
+        direction: str = "outbound",
+        source: str | None = None,
+    ) -> int:
+        clean_summary = " ".join((summary or "").split())
+        if not clean_summary:
+            raise ValueError("summary is required for CRM interaction")
+        with self.db.cursor(commit=True) as (_, cur):
+            cur.execute(
+                """
+                INSERT INTO crm.interactions (
+                    contact_id,
+                    raw_capture_id,
+                    channel,
+                    direction,
+                    summary,
+                    source
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id;
+                """,
+                (contact_id, raw_capture_id, channel, direction, clean_summary, source),
+            )
+            row = cur.fetchone()
+        return int(row[0])
 
     def claim(self, *, job_id: int | None = None) -> CaptureJob | None:
         filters = ["j.status IN ('pending', 'retry')"]

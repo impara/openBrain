@@ -58,6 +58,41 @@ def rebuild_managed_memories(*, reset: bool = False) -> str:
     return get_app().rebuild_managed_memories(reset=reset)
 
 
+def crm_log_interaction_with_ingest(
+    content: str,
+    *,
+    full_name: str,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    email: str | None = None,
+    phone: str | None = None,
+    company: str | None = None,
+    role: str | None = None,
+    location: str | None = None,
+    tags: list[str] | None = None,
+    notes: str | None = None,
+    channel: str = "chat",
+    direction: str = "outbound",
+    source: str = "crm_note",
+) -> str:
+    return get_app().crm_log_interaction_with_ingest(
+        content,
+        full_name=full_name,
+        first_name=first_name,
+        last_name=last_name,
+        email=email,
+        phone=phone,
+        company=company,
+        role=role,
+        location=location,
+        tags=tags,
+        notes=notes,
+        channel=channel,
+        direction=direction,
+        source=source,
+    )
+
+
 def start_background_workers() -> None:
     get_app().start_background_workers()
 
@@ -94,5 +129,6 @@ __all__ = [
     "search_brain",
     "start_background_workers",
     "stop_background_workers",
+    "crm_log_interaction_with_ingest",
     "_process_capture_job_by_id",
 ]

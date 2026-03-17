@@ -98,6 +98,10 @@ This starts three containers:
 - `open_brain_mcp` — Python MCP server exposing the memory tools
 - `open_brain_telegram` — Telegram bot for chat-based memory access
 
+Optional CRM containers (for a “human door” UI over the same database):
+- `open_brain_crm_api` — FastAPI read-only CRM API over `crm.*` tables
+- `open_brain_crm_ui` — Next.js UI (contacts list + interaction timeline)
+
 ### 3. Verify
 
 ```bash
@@ -154,6 +158,22 @@ Returns active managed memories such as standing directives and preferences.
 | `query` | `str` | `""` | Optional semantic filter over active managed memories |
 | `kind` | `str` \| `null` | `null` | Optional kind filter: `directive` or `preference` |
 
+### `crm_log_interaction_with_ingest`
+
+Atomically logs a CRM interaction by (1) ingesting the raw text into OpenBrain, (2) upserting the related contact, and (3) writing a structured interaction row linked back to the `raw_capture_id`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `content` | `str` | required | Full text to ingest and associate with the interaction |
+| `full_name` | `str` | required | Contact’s full name |
+| `email` | `str` \| `null` | `null` | Optional email used as the upsert key when present |
+| `company` | `str` \| `null` | `null` | Optional company |
+| `tags` | `list[str]` \| `null` | `null` | Optional tag list |
+| `notes` | `str` \| `null` | `null` | Optional short summary (used as the interaction summary when present) |
+| `channel` | `str` | `"chat"` | Interaction channel (`chat`, `email`, `call`, `meeting`, etc.) |
+| `direction` | `str` | `"outbound"` | `inbound` or `outbound` |
+| `source` | `str` | `"crm_note"` | `raw_captures.source` for provenance |
+
 ---
 
 ## Configuration
@@ -167,7 +187,7 @@ All configuration is via environment variables (`.env` file):
 | `POSTGRES_PASSWORD` | **Yes** | — | Database password |
 | `POSTGRES_HOST` | No | `localhost` | DB host (set to `open-brain-db` in Docker) |
 | `POSTGRES_PORT` | No | `5432` | DB port |
-| `MCP_PORT` | No | `8001` | Host port mapped to MCP server container port 8000. On Coolify, avoid `8000` because Coolify itself uses it. |
+| `MCP_PORT` | No | `8000` | Host port mapped to MCP server container port 8000. If your platform reserves 8000, set `MCP_PORT` to another free port and update your MCP client URL. |
 | `OPENBRAIN_LLM_PROVIDER` | No | `openai` | Structured-generation provider: `openai`, `openrouter`, or `ollama` |
 | `OPENBRAIN_LLM_MODEL` | No | provider-specific | Model used for fact and graph extraction |
 | `OPENBRAIN_LLM_BASE_URL` | No | provider-specific | Base URL for the configured LLM provider |
@@ -206,7 +226,7 @@ When running via Docker, the MCP server exposes a Streamable HTTP endpoint. Any 
 {
   "mcpServers": {
     "open-brain": {
-      "serverUrl": "http://localhost:8001/mcp"
+      "url": "http://localhost:8000/mcp"
     }
   }
 }
@@ -299,6 +319,8 @@ openBrain/
 ├── Dockerfile.mcp        # Python container for the MCP server
 ├── Dockerfile.telegram   # Python container for the Telegram bot
 ├── docker-compose.yml    # Three-service orchestration (DB + MCP + Telegram)
+├── crm_api/              # Optional FastAPI CRM API (read-only)
+├── crm_ui/               # Optional Next.js CRM UI (contacts + timeline)
 ├── mcp.json              # MCP server config reference for IDE integration
 ├── requirements.txt      # Pinned Python dependencies
 ├── .env.example          # Environment variable template

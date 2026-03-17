@@ -206,6 +206,77 @@ class OpenBrainApplication:
             return format_debug_report(query, ranking_debug, evidence)
         return format_search_response(query, evidence)
 
+    # ── CRM-facing helpers ──────────────────────────────────────────────────
+
+    def crm_log_interaction_with_ingest(
+        self,
+        content: str,
+        *,
+        full_name: str,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        email: str | None = None,
+        phone: str | None = None,
+        company: str | None = None,
+        role: str | None = None,
+        location: str | None = None,
+        tags: list[str] | None = None,
+        notes: str | None = None,
+        channel: str = "chat",
+        direction: str = "outbound",
+        source: str = "crm_note",
+    ) -> str:
+        """
+        Atomic helper used by MCP: ingest raw text into OpenBrain, upsert a CRM
+        contact, and log an interaction linked back to the raw capture.
+        """
+        content = (content or "").strip()
+        if not content:
+            return "Warning: Please provide non-empty content."
+
+        ingest_strategy = detect_auto_ingest_strategy(content, source=source)
+        try:
+            persist_result = self.repositories.capture_and_enqueue(
+                content,
+                user_id=self.brain_user_id(),
+                source=source,
+                ingest_strategy=ingest_strategy,
+                external_id=None,
+                managed_kind_override=None,
+            )
+        except Exception as exc:
+            logger.error("CRM interaction ingest failed source=%s: %s", source, exc)
+            return f"Warning: Failed to persist CRM interaction. Error: {exc}.{_PERSIST_ERROR_HINT}"
+
+        raw_capture_id = persist_result.raw_capture_id
+        try:
+            contact_id = self.repositories.crm_upsert_contact(
+                full_name=full_name,
+                first_name=first_name,
+                last_name=last_name,
+                email=email,
+                phone=phone,
+                company=company,
+                role=role,
+                location=location,
+                tags=tags or [],
+                notes=notes,
+                last_modified_by="agent",
+            )
+            self.repositories.crm_log_interaction(
+                contact_id=contact_id,
+                raw_capture_id=raw_capture_id,
+                summary=notes or content,
+                channel=channel,
+                direction=direction,
+                source=source,
+            )
+        except Exception as exc:
+            logger.error("CRM interaction write failed: %s", exc)
+            return f"Warning: Failed to write CRM interaction. Error: {exc}."
+
+        return "CRM interaction logged and queued for indexing."
+
     def get_active_memories(self, *, query: str = "", kind: str | None = None) -> str:
         kind = self._normalize_managed_kind(kind)
         if kind is False:

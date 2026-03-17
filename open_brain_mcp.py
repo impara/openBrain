@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from brain_core import (
     capture_thought,
+    crm_log_interaction_with_ingest,
     get_active_memories,
     ingest,
     search_brain,
@@ -96,6 +97,54 @@ def mcp_get_active_memories(query: str = "", kind: str | None = None) -> str:
         kind: Optional kind filter: directive or preference.
     """
     return get_active_memories(query=query, kind=kind)
+
+
+@mcp.tool(name="crm_log_interaction_with_ingest")
+def mcp_crm_log_interaction_with_ingest(
+    content: str,
+    full_name: str,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    email: str | None = None,
+    phone: str | None = None,
+    company: str | None = None,
+    role: str | None = None,
+    location: str | None = None,
+    tags: list[str] | None = None,
+    notes: str | None = None,
+    channel: str = "chat",
+    direction: str = "outbound",
+    source: str = "crm_note",
+) -> str:
+    """
+    Atomically ingest a free-form CRM interaction, upsert the related contact,
+    and log a structured interaction linked back to the raw capture.
+
+    Args:
+        content: Full text of the interaction or note.
+        full_name: Contact's full name (required).
+        first_name, last_name, email, phone, company, role, location, tags, notes:
+            Optional structured fields for the contact and interaction.
+        channel: Interaction channel (e.g. email, call, meeting, chat).
+        direction: inbound or outbound (default outbound).
+        source: Origin label for the underlying raw capture.
+    """
+    return crm_log_interaction_with_ingest(
+        content,
+        full_name=full_name,
+        first_name=first_name,
+        last_name=last_name,
+        email=email,
+        phone=phone,
+        company=company,
+        role=role,
+        location=location,
+        tags=tags,
+        notes=notes,
+        channel=channel,
+        direction=direction,
+        source=source,
+    )
 
 
 if __name__ == "__main__":

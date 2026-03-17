@@ -38,7 +38,7 @@ services:
       open-brain-db:
         condition: service_healthy
     ports:
-      - "${MCP_PORT:-8001}:8000"
+      - "${MCP_PORT:-8000}:8000"
     restart: always
     networks:
       - brain_net
@@ -54,6 +54,44 @@ services:
     depends_on:
       open-brain-db:
         condition: service_healthy
+    restart: always
+    networks:
+      - brain_net
+
+  crm-api:
+    build:
+      context: .
+      dockerfile: crm_api/Dockerfile
+    container_name: open_brain_crm_api
+    env_file: .env
+    environment:
+      POSTGRES_HOST: open-brain-db
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      open-brain-db:
+        condition: service_healthy
+    ports:
+      - "8002:8000"
+    restart: always
+    networks:
+      - brain_net
+
+  crm-ui:
+    build:
+      context: .
+      dockerfile: crm_ui/Dockerfile
+    container_name: open_brain_crm_ui
+    environment:
+      API_URL: http://crm-api:8000
+    depends_on:
+      crm-api:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
     restart: always
     networks:
       - brain_net
